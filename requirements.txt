@@ -1,0 +1,10 @@
+Flask==2.3.0
+Flask-SQLAlchemy==3.0.5
+pymysql==1.1.0
+openpyxl==3.1.2
+pandas==2.0.3
+python-dateutil==2.8.2
+celery==5.3.1
+redis==4.6.0
+eventlet==0.33.3
+gunicorn==21.2.0

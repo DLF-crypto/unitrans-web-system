@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# 数据文件夹 - 不上传到生产环境
+customer invoices/
+supplier invoices/
+uploads/
+
+# 数据库文件
+*.db
+*.sqlite3
+
+# 环境配置
+.env
+config.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日志
+*.log
+
+# 临时文件
+*.tmp
+.DS_Store

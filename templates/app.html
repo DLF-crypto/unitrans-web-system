@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>淘客天下联合发运运单管理系统 - 控制台</title>
+    <link rel="stylesheet" href="/static/styles/main.css">
+    <link rel="icon" href="data:,">
+</head>
+<body>
+{% raw %}
+<div id="app" v-cloak>
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <img src="/pictures/TK Logo.png" class="brand-logo" alt="Logo">
+                <div>
+                    <div class="brand-text-main">淘客天下联合发运</div>
+                    <div class="brand-text-sub">运单管理系统控制台</div>
+                </div>
+            </div>
+
+            <div class="menu-section-title">导航菜单</div>
+            <nav class="menu">
+                <div class="menu-group" v-for="menu in filteredMenus" :key="menu.id">
+                    <router-link
+                        v-if="!menu.children || menu.children.length === 0"
+                        :to="menu.path"
+                        class="menu-item"
+                    >
+                        <div class="menu-item-left">
+                            <div class="menu-dot"></div>
+                            <span>{{ menu.title }}</span>
+                        </div>
+                    </router-link>
+                    
+                    <div
+                        v-else
+                        class="menu-item"
+                        :class="{ 'router-link-active': isMenuActive(menu) }"
+                        @click="toggleExpand(menu)"
+                    >
+                        <div class="menu-item-left">
+                            <div class="menu-dot"></div>
+                            <span>{{ menu.title }}</span>
+                        </div>
+                        <div class="menu-arrow">
+                            <span v-if="isExpanded(menu)">▾</span>
+                            <span v-else>▸</span>
+                        </div>
+                    </div>
+
+                    <transition name="collapse">
+                        <div
+                            v-if="menu.children && menu.children.length && isExpanded(menu)"
+                            class="submenu"
+                        >
+                            <router-link
+                                v-for="child in menu.children"
+                                :key="child.id"
+                                :to="child.path"
+                                class="submenu-item"
+                            >
+                                {{ child.title }}
+                            </router-link>
+                        </div>
+                    </transition>
+                </div>
+            </nav>
+
+            <div class="sidebar-footer">
+                当前角色：
+                <span class="sidebar-role-tag">系统管理员（拥有所有页面权限）</span>
+            </div>
+        </aside>
+
+        <main class="content">
+            <header class="topbar">
+                <div class="topbar-title">淘客天下联合发运运单管理系统</div>
+                <div class="topbar-user">
+                    <div class="topbar-user-info" @click.stop="toggleUserMenu">
+                        <span>当前用户：</span>
+                        <span class="topbar-user-name">{{ currentUser.username }}</span>
+                        <span class="topbar-user-role">{{ currentUser.role }}</span>
+                        <span class="topbar-user-arrow">▼</span>
+                    </div>
+                    
+                    <div v-show="showUserMenu" class="user-dropdown">
+                        <button class="user-dropdown-item" @click="showChangePasswordModal">
+                            <span>🔑</span>
+                            <span>修改密码</span>
+                        </button>
+                        <div class="user-dropdown-divider"></div>
+                        <button class="user-dropdown-item danger" @click="logout">
+                            <span>🚺</span>
+                            <span>退出登录</span>
+                        </button>
+                    </div>
+                </div>
+            </header>
+
+            <section class="content-inner">
+                <router-view></router-view>
+            </section>
+        </main>
+    </div>
+    
+    <!-- 修改密码弹窗 -->
+    <div v-if="showPasswordModal" class="modal-overlay" @click.self="closePasswordModal">
+        <div class="modal-content" style="max-width: 450px;">
+            <div class="modal-header">
+                <h3 class="modal-title">修改密码</h3>
+                <button class="modal-close" @click="closePasswordModal">&times;</button>
+            </div>
+            
+            <form @submit.prevent="submitPasswordChange" class="modal-body">
+                <div class="form-field" style="margin-bottom: 16px;">
+                    <label>旧密码 <span style="color: #e57373;">*</span></label>
+                    <input
+                        type="password"
+                        class="form-input"
+                        v-model.trim="passwordForm.oldPassword"
+                        placeholder="请输入当前密码"
+                        autocomplete="current-password"
+                    />
+                    <div v-if="passwordErrors.oldPassword" class="error-text">{{ passwordErrors.oldPassword }}</div>
+                </div>
+                
+                <div class="form-field" style="margin-bottom: 16px;">
+                    <label>新密码 <span style="color: #e57373;">*</span></label>
+                    <input
+                        type="password"
+                        class="form-input"
+                        v-model.trim="passwordForm.newPassword"
+                        placeholder="请输入新密码（至少6位）"
+                        autocomplete="new-password"
+                    />
+                    <div v-if="passwordErrors.newPassword" class="error-text">{{ passwordErrors.newPassword }}</div>
+                </div>
+                
+                <div class="form-field" style="margin-bottom: 16px;">
+                    <label>确认新密码 <span style="color: #e57373;">*</span></label>
+                    <input
+                        type="password"
+                        class="form-input"
+                        v-model.trim="passwordForm.confirmPassword"
+                        placeholder="请再次输入新密码"
+                        autocomplete="new-password"
+                    />
+                    <div v-if="passwordErrors.confirmPassword" class="error-text">{{ passwordErrors.confirmPassword }}</div>
+                </div>
+                
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" @click="closePasswordModal">取消</button>
+                    <button type="submit" class="btn btn-primary" :disabled="passwordSubmitting">
+                        <span v-if="!passwordSubmitting">确认修改</span>
+                        <span v-else>修改中...</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endraw %}
+
+<script type="text/template" id="initial-data">
+    {{ user | tojson }}
+</script>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js"></script>
+<script src="https://unpkg.com/echarts@5.4.3/dist/echarts.min.js"></script>
+<script src="/static/components/PlaceholderPage.js"></script>
+<script src="/static/components/DashboardPage.js"></script>
+<script src="/static/components/RoleManagePage.js"></script>
+<script src="/static/components/UserManagePage.js"></script>
+<script src="/static/components/CountryManagePage.js"></script>
+<script src="/static/components/ProductManagePage.js"></script>
+<script src="/static/components/CustomerManagePage.js"></script>
+<script src="/static/components/SupplierManagePage.js"></script>
+<script src="/static/components/CustomerQuoteManagePage.js"></script>
+<script src="/static/components/SupplierQuoteManagePage.js"></script>
+<script src="/static/components/WaybillManagePage.js"></script>
+<script src="/static/components/ReceivableInvoicePage.js"></script>
+<script src="/static/components/PayableInvoicePage.js"></script>
+<script src="/static/components/PaymentManagePage.js"></script>
+<script>
+    const initialUser = JSON.parse(document.getElementById('initial-data').textContent);
+    const { createApp } = Vue;
+    const { createRouter, createWebHashHistory } = VueRouter;
+
+    // 路由配置
+    const routes = [
+        { path: "/", redirect: "/dashboard" },
+        { path: "/dashboard", component: DashboardPage, meta: { title: "仪表盘" } },
+        { path: "/basic/role", component: RoleManagePage, meta: { title: "角色管理" } },
+        { path: "/basic/user", component: UserManagePage, meta: { title: "用户管理" } },
+        { path: "/basic/country", component: CountryManagePage, meta: { title: "目的国管理" } },
+        { path: "/basic/product", component: ProductManagePage, meta: { title: "产品管理" } },
+        { path: "/basic/customer", component: CustomerManagePage, meta: { title: "客户管理" } },
+        { path: "/basic/supplier", component: SupplierManagePage, meta: { title: "供应商管理" } },
+        { path: "/waybill", component: WaybillManagePage, meta: { title: "运单数据管理" } },
+        { path: "/finance/ar-bill", component: ReceivableInvoicePage, meta: { title: "应收账单管理" } },
+        { path: "/finance/ap-bill", component: PayableInvoicePage, meta: { title: "应付账单管理" } },
+        { path: "/finance/payment", component: PaymentManagePage, meta: { title: "收付款管理" } },
+        { path: "/finance/customer-quote", component: CustomerQuoteManagePage, meta: { title: "客户报价管理" } },
+        { path: "/finance/supplier-quote", component: SupplierQuoteManagePage, meta: { title: "供应商报价管理" } },
+    ];
+
+    const router = createRouter({
+        history: createWebHashHistory(),
+        routes,
+    });
+
+    // 菜单配置
+    const menus = [
+        { id: "dashboard", title: "仪表盘", path: "/dashboard", children: [] },
+        {
+            id: "basic",
+            title: "基础资料管理",
+            children: [
+                { id: "role", title: "角色管理", path: "/basic/role" },
+                { id: "user", title: "用户管理", path: "/basic/user" },
+                { id: "country", title: "目的国管理", path: "/basic/country" },
+                { id: "product", title: "产品管理", path: "/basic/product" },
+                { id: "customer", title: "客户管理", path: "/basic/customer" },
+                { id: "supplier", title: "供应商管理", path: "/basic/supplier" },
+            ],
+        },
+        { id: "waybill", title: "运单数据管理", path: "/waybill", children: [] },
+        {
+            id: "finance",
+            title: "财务管理",
+            children: [
+                { id: "ar-bill", title: "应收账单管理", path: "/finance/ar-bill" },
+                { id: "ap-bill", title: "应付账单管理", path: "/finance/ap-bill" },
+                { id: "payment", title: "收付款管理", path: "/finance/payment" },
+                { id: "customer-quote", title: "客户报价管理", path: "/finance/customer-quote" },
+                { id: "supplier-quote", title: "供应商报价管理", path: "/finance/supplier-quote" },
+            ],
+        },
+    ];
+
+    const app = createApp({
+        data() {
+            return {
+                currentUser: initialUser,
+                menus,
+                expandedIds: ["basic", "finance"],
+                showUserMenu: false,
+                showPasswordModal: false,
+                passwordForm: {
+                    oldPassword: "",
+                    newPassword: "",
+                    confirmPassword: "",
+                },
+                passwordErrors: {
+                    oldPassword: "",
+                    newPassword: "",
+                    confirmPassword: "",
+                },
+                passwordSubmitting: false,
+                userPermissions: null,  // 用户权限
+                visibleMenus: [],  // 可见的菜单
+            };
+        },
+        async mounted() {
+            // 点击其他地方关闭下拉菜单
+            document.addEventListener('click', (e) => {
+                // 如果点击的是用户信息区域，不关闭
+                if (!e.target.closest('.topbar-user')) {
+                    this.showUserMenu = false;
+                }
+            });
+            
+            // 加载用户权限
+            await this.loadUserPermissions();
+        },
+        computed: {
+            filteredMenus() {
+                if (!this.userPermissions) {
+                    return [];
+                }
+                
+                // 如果是管理员，显示所有菜单
+                if (this.userPermissions.permissions === 'ALL') {
+                    return this.menus;
+                }
+                
+                // 根据权限过滤菜单
+                const permMap = {};
+                this.userPermissions.pages.forEach(p => {
+                    permMap[p.page_key] = p;
+                });
+                
+                const filtered = [];
+                this.menus.forEach(menu => {
+                    if (!menu.children || menu.children.length === 0) {
+                        // 一级菜单，检查是否有 can_view 权限
+                        const menuKey = this.getMenuKey(menu.path);
+                        if (permMap[menuKey] && permMap[menuKey].can_view) {
+                            filtered.push(menu);
+                        }
+                    } else {
+                        // 有子菜单，过滤子菜单
+                        const visibleChildren = menu.children.filter(child => {
+                            const childKey = this.getMenuKey(child.path);
+                            return permMap[childKey] && permMap[childKey].can_view;
+                        });
+                        
+                        if (visibleChildren.length > 0) {
+                            filtered.push({
+                                ...menu,
+                                children: visibleChildren
+                            });
+                        }
+                    }
+                });
+                
+                return filtered;
+            }
+        },
+        methods: {
+            async loadUserPermissions() {
+                try {
+                    const res = await fetch('/api/user-permissions');
+                    const data = await res.json();
+                    if (data.success) {
+                        this.userPermissions = data;
+                    }
+                } catch (e) {
+                    console.error('加载用户权限失败', e);
+                }
+            },
+            getMenuKey(path) {
+                // 将路径转换为 page_key
+                // /dashboard -> dashboard
+                // /basic/role -> basic.role
+                // /waybill -> waybill.main
+                const pathMap = {
+                    '/dashboard': 'dashboard',
+                    '/basic/role': 'basic.role',
+                    '/basic/user': 'basic.user',
+                    '/basic/country': 'basic.country',
+                    '/basic/product': 'basic.product',
+                    '/basic/customer': 'basic.customer',
+                    '/basic/supplier': 'basic.supplier',
+                    '/waybill': 'waybill.main',
+                    '/finance/ar-bill': 'finance.ar_bill',
+                    '/finance/ap-bill': 'finance.ap_bill',
+                    '/finance/payment': 'finance.payment',
+                    '/finance/customer-quote': 'finance.customer_quote',
+                    '/finance/supplier-quote': 'finance.supplier_quote',
+                };
+                return pathMap[path] || '';
+            },
+            isExpanded(menu) {
+                return this.expandedIds.includes(menu.id);
+            },
+            toggleExpand(menu) {
+                if (!menu.children || !menu.children.length) return;
+                const idx = this.expandedIds.indexOf(menu.id);
+                if (idx >= 0) {
+                    this.expandedIds.splice(idx, 1);
+                } else {
+                    this.expandedIds.push(menu.id);
+                }
+            },
+            isMenuActive(menu) {
+                if (!menu.children || !menu.children.length) return false;
+                const currentPath = this.$route.path;
+                return menu.children.some(child => child.path === currentPath);
+            },
+            toggleUserMenu() {
+                this.showUserMenu = !this.showUserMenu;
+            },
+            showChangePasswordModal() {
+                this.showUserMenu = false;
+                this.showPasswordModal = true;
+                this.resetPasswordForm();
+            },
+            closePasswordModal() {
+                this.showPasswordModal = false;
+                this.resetPasswordForm();
+            },
+            resetPasswordForm() {
+                this.passwordForm = {
+                    oldPassword: "",
+                    newPassword: "",
+                    confirmPassword: "",
+                };
+                this.passwordErrors = {
+                    oldPassword: "",
+                    newPassword: "",
+                    confirmPassword: "",
+                };
+            },
+            validatePasswordForm() {
+                this.passwordErrors = {
+                    oldPassword: "",
+                    newPassword: "",
+                    confirmPassword: "",
+                };
+                
+                let isValid = true;
+                
+                if (!this.passwordForm.oldPassword) {
+                    this.passwordErrors.oldPassword = "请输入当前密码";
+                    isValid = false;
+                }
+                
+                if (!this.passwordForm.newPassword) {
+                    this.passwordErrors.newPassword = "请输入新密码";
+                    isValid = false;
+                } else if (this.passwordForm.newPassword.length < 6) {
+                    this.passwordErrors.newPassword = "密码长度至少6位";
+                    isValid = false;
+                }
+                
+                if (!this.passwordForm.confirmPassword) {
+                    this.passwordErrors.confirmPassword = "请确认新密码";
+                    isValid = false;
+                } else if (this.passwordForm.newPassword !== this.passwordForm.confirmPassword) {
+                    this.passwordErrors.confirmPassword = "两次密码输入不一致";
+                    isValid = false;
+                }
+                
+                return isValid;
+            },
+            async submitPasswordChange() {
+                if (!this.validatePasswordForm()) {
+                    return;
+                }
+                
+                this.passwordSubmitting = true;
+                
+                try {
+                    const res = await fetch("/api/change-password", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                        },
+                        body: JSON.stringify({
+                            oldPassword: this.passwordForm.oldPassword,
+                            newPassword: this.passwordForm.newPassword,
+                        }),
+                    });
+                    
+                    const data = await res.json().catch(() => ({}));
+                    
+                    if (!res.ok || !data.success) {
+                        if (data.field) {
+                            this.passwordErrors[data.field] = data.message;
+                        } else {
+                            alert(data.message || "修改密码失败");
+                        }
+                        return;
+                    }
+                    
+                    alert("密码修改成功，请重新登录");
+                    this.closePasswordModal();
+                    
+                    // 退出登录
+                    setTimeout(() => {
+                        fetch('/api/logout', { method: 'POST' })
+                            .finally(() => {
+                                window.location.href = '/login';
+                            });
+                    }, 500);
+                    
+                } catch (e) {
+                    alert("修改密码失败，请稍后重试");
+                } finally {
+                    this.passwordSubmitting = false;
+                }
+            },
+            logout() {
+                if (!confirm('确定要退出登录吗？')) {
+                    return;
+                }
+                this.showUserMenu = false;
+                fetch('/api/logout', { method: 'POST' })
+                    .then(() => {
+                        window.location.href = '/login';
+                    })
+                    .catch(() => {
+                        window.location.href = '/login';
+                    });
+            },
+        },
+    });
+
+    app.use(router);
+    app.mount("#app");
+</script>
+</body>
+</html>
