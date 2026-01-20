@@ -10,26 +10,21 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-    /var/www/unitrans-web-system/unitrans-web-system
-    - name: Deploy to server
-      uses: appleboy/ssh-action@v0.1.5
-      with:
-        host: ${{ secrets.SERVER_HOST }}
-        username: ${{ secrets.SERVER_USER }}
-        key: ${{ secrets.SERVER_SSH_KEY }}
-        port: 22
-        timeout: 30s
-        script: |
-          cd /var/www/unitrans-web-system/unitrans-web-system
-          git stash
-          git pull origin main
-          source venv/bin/activate
-          pip install -r requirements.txt --upgrade
-          sudo systemctl restart unitrans-web
-          sudo systemctl restart unitrans-celery
-          
-          # 检查服务状态
-          sudo systemctl status unitrans-web --no-pager
-          sudo systemctl status unitrans-celery --no-pager
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v0.1.5
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          timeout: 30s
+          script: |
+            cd /var/www/unitrans-web-system/unitrans-web-system
+            git pull origin main
+            source venv/bin/activate
+            pip install -r requirements.txt
+            sudo systemctl restart unitrans-web
+            sudo systemctl restart unitrans-celery
