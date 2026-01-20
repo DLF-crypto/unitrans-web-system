@@ -61,9 +61,17 @@ if not os.path.exists(SUPPLIER_INVOICE_FOLDER):
     os.makedirs(SUPPLIER_INVOICE_FOLDER)
 app.config['SUPPLIER_INVOICE_FOLDER'] = SUPPLIER_INVOICE_FOLDER
 
-# 数据库配置：连接到 unitransDB
+import os
+
+# 数据库配置 - 使用环境变量
+DB_USER = os.environ.get('DB_USER', 'root')  # 本地使用 root
+DB_PASSWORD = os.environ.get('DB_PASSWORD', '123456')  # 本地使用 123456
+DB_HOST = os.environ.get('DB_HOST', '127.0.0.1')
+DB_PORT = os.environ.get('DB_PORT', '3308')  # 本地使用 3308
+DB_NAME = os.environ.get('DB_NAME', 'unitransDB')
+
 app.config["SQLALCHEMY_DATABASE_URI"] = (
-    "mysql+pymysql://root:123456@127.0.0.1:3308/unitransDB?charset=utf8mb4"
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
 )
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
@@ -3805,6 +3813,59 @@ def api_dashboard_unpaid_details():
         return jsonify({"success": True, "details": details})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ==================== GitHub 自动部署 Webhook ====================
+@app.post('/hooks/github')
+def github_webhook():
+    """处理 GitHub 的 Webhook 请求，自动部署代码更新"""
+    # 验证请求来源
+    signature = request.headers.get('X-Hub-Signature')
+    if not signature:
+        return jsonify({'success': False, 'message': 'Missing signature'}), 400
+    
+    # 获取密钥（建议从环境变量中读取）
+    webhook_secret = os.environ.get('GITHUB_WEBHOOK_SECRET', 'your-webhook-secret-here')
+    
+    # 验证签名
+    payload_body = request.data
+    mac = hmac.new(
+        webhook_secret.encode('utf-8'),
+        msg=payload_body,
+        digestmod=hashlib.sha1
+    )
+    expected_signature = 'sha1=' + mac.hexdigest()
+    
+    if not hmac.compare_digest(signature, expected_signature):
+        return jsonify({'success': False, 'message': 'Invalid signature'}), 401
+    
+    # 解析请求体
+    payload = request.json
+    
+    # 检查是否是 push 事件且推送到主分支
+    if request.headers.get('X-GitHub-Event') == 'push':
+        ref = payload.get('ref')
+        if ref in ['refs/heads/main', 'refs/heads/master']:  # 支持常见的主分支名称
+            try:
+                # 执行 git pull 拉取最新代码
+                result = subprocess.run(['git', 'pull'], cwd=os.getcwd(), capture_output=True, text=True)
+                if result.returncode != 0:
+                    return jsonify({'success': False, 'message': f'Git pull failed: {result.stderr}'})
+                
+                # 重新安装依赖（如果有变动）
+                pip_result = subprocess.run(['pip', 'install', '-r', 'requirements.txt'], 
+                                           cwd=os.getcwd(), capture_output=True, text=True)
+                
+                return jsonify({
+                    'success': True, 
+                    'message': 'Code updated successfully',
+                    'git_output': result.stdout,
+                    'pip_output': pip_result.stdout if 'pip_result' in locals() else ''
+                })
+            except Exception as e:
+                return jsonify({'success': False, 'message': f'Deployment failed: {str(e)}'})
+    
+    return jsonify({'success': True, 'message': 'Event received but not processed'})
 
 
 if __name__ == "__main__":

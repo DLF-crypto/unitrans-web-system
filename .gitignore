@@ -33,3 +33,8 @@ config.py
 # 临时文件
 *.tmp
 .DS_Store
+.env
+config.py
+.env.local
+.env.production
+.env.development
