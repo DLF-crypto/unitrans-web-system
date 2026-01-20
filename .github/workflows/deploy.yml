@@ -12,7 +12,7 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
-    
+    /var/www/unitrans-web-system/unitrans-web-system
     - name: Deploy to server
       uses: appleboy/ssh-action@v0.1.5
       with:
@@ -22,7 +22,7 @@ jobs:
         port: 22
         timeout: 30s
         script: |
-          cd /var/www/unitrans-web-system
+          cd /var/www/unitrans-web-system/unitrans-web-system
           git stash
           git pull origin main
           source venv/bin/activate
