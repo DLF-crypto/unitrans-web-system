@@ -5,7 +5,9 @@ import io
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
 import os
+load_dotenv()
 import json
 
 from flask import Flask, render_template, redirect, url_for, request, jsonify, session, send_file, send_from_directory
