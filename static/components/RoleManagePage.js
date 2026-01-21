@@ -2,6 +2,43 @@
 const RoleManagePage = {
     template: `
         <div class="page-container">
+            <style>
+                .field-permission-grid {
+                    display: grid;
+                    gap: 16px;
+                    margin-top: 12px;
+                }
+                .field-group {
+                    border: 1px solid #e0e0e0;
+                    border-radius: 8px;
+                    padding: 12px;
+                    background-color: #fafafa;
+                }
+                .field-group-title {
+                    font-weight: 600;
+                    margin-bottom: 8px;
+                    color: #333;
+                    font-size: 14px;
+                }
+                .field-checkboxes {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                    gap: 8px;
+                }
+                .field-checkbox-label {
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    font-size: 13px;
+                    cursor: pointer;
+                    padding: 6px;
+                    border-radius: 4px;
+                    transition: background-color 0.2s;
+                }
+                .field-checkbox-label:hover {
+                    background-color: #e3f2fd;
+                }
+            </style>
             <div class="page-header">
                 <h2 class="page-title">角色管理</h2>
                 <button class="btn btn-primary" @click="showModal = true">
@@ -124,6 +161,24 @@ const RoleManagePage = {
                             </table>
                         </div>
 
+                        <!-- 字段权限配置 - 仅对运单数据管理页面显示 -->
+                        <div class="form-section" v-if="rolePages.some(p => p.pageKey === 'waybill.main' && p.canView)">
+                            <div class="form-section-title">运单数据字段权限配置（勾选允许查看的字段）</div>
+                            <div class="field-permission-grid">
+                                <template v-for="page in rolePages.filter(p => p.pageKey === 'waybill.main')" :key="page.pageKey">
+                                    <div class="field-group" v-for="group in getFieldGroups(page.fieldPermissions)" :key="group.title">
+                                        <div class="field-group-title">{{ group.title }}</div>
+                                        <div class="field-checkboxes">
+                                            <label v-for="field in group.fields" :key="field.key" class="field-checkbox-label">
+                                                <input type="checkbox" v-model="page.fieldPermissions[field.key].visible" />
+                                                {{ field.label }}
+                                            </label>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
                         <div class="modal-footer">
                             <button type="button" class="btn btn-secondary" @click="closeModal">取消</button>
                             <button type="submit" class="btn btn-primary" :disabled="roleSubmitting">
@@ -159,7 +214,28 @@ const RoleManagePage = {
                 { pageKey: "basic.product", group: "基础资料管理", title: "产品管理", canView: false, canCreate: false, canUpdate: false, canDelete: false },
                 { pageKey: "basic.customer", group: "基础资料管理", title: "客户管理", canView: false, canCreate: false, canUpdate: false, canDelete: false },
                 { pageKey: "basic.supplier", group: "基础资料管理", title: "供应商管理", canView: false, canCreate: false, canUpdate: false, canDelete: false },
-                { pageKey: "waybill.main", group: "运单数据管理", title: "运单数据管理", canView: false, canCreate: false, canUpdate: false, canDelete: false },
+                { pageKey: "waybill.main", group: "运单数据管理", title: "运单数据管理", canView: false, canCreate: false, canUpdate: false, canDelete: false,
+                                    fieldPermissions: {
+                                        order_no: { visible: false, label: "订单号", category: "基础信息" },
+                                        transfer_no: { visible: false, label: "转单号", category: "基础信息" },
+                                        weight: { visible: false, label: "重量(kg)", category: "基础信息" },
+                                        order_time: { visible: false, label: "下单时间", category: "基础信息" },
+                                        product_name: { visible: false, label: "产品", category: "基础信息" },
+                                        unit_customer_name: { visible: false, label: "单号客户", category: "客户信息" },
+                                        first_leg_customer_name: { visible: false, label: "头程客户", category: "客户信息" },
+                                        last_leg_customer_name: { visible: false, label: "尾程客户", category: "客户信息" },
+                                        differential_customer_name: { visible: false, label: "差价客户", category: "客户信息" },
+                                        supplier_name: { visible: false, label: "供应商", category: "供应商信息" },
+                                        unit_fee: { visible: false, label: "单号收费", category: "费用信息" },
+                                        first_leg_fee: { visible: false, label: "头程收费", category: "费用信息" },
+                                        last_leg_fee: { visible: false, label: "尾程收费", category: "费用信息" },
+                                        differential_fee: { visible: false, label: "差价收费", category: "费用信息" },
+                                        supplier_cost: { visible: false, label: "供应商成本", category: "费用信息" },
+                                        dedicated_line_fee: { visible: false, label: "专线处理费", category: "费用信息" },
+                                        other_fee: { visible: false, label: "其他费用", category: "费用信息" },
+                                        remark: { visible: false, label: "备注", category: "备注信息" }
+                                    }
+                                },
                 { pageKey: "finance.ar_bill", group: "财务管理", title: "应收账单管理", canView: false, canCreate: false, canUpdate: false, canDelete: false },
                 { pageKey: "finance.ap_bill", group: "财务管理", title: "应付账单管理", canView: false, canCreate: false, canUpdate: false, canDelete: false },
                 { pageKey: "finance.payment", group: "财务管理", title: "收付款管理", canView: false, canCreate: false, canUpdate: false, canDelete: false },
@@ -203,6 +279,59 @@ const RoleManagePage = {
                 minute: "2-digit"
             });
         },
+        
+        getFieldGroups(fieldPermissions) {
+            if (!fieldPermissions) return [];
+            
+            // 按照类别分组字段
+            const groups = {};
+            Object.keys(fieldPermissions).forEach(key => {
+                const field = fieldPermissions[key];
+                if (!groups[field.category]) {
+                    groups[field.category] = [];
+                }
+                groups[field.category].push({
+                    key: key,
+                    label: field.label,
+                    visible: field.visible
+                });
+            });
+            
+            // 转换为数组格式
+            return Object.keys(groups).map(category => {
+                return {
+                    title: category,
+                    fields: groups[category]
+                };
+            });
+        },
+        
+        initializeFieldPermissions() {
+            // 初始化运单页面的字段权限
+            const waybillPage = this.rolePages.find(p => p.pageKey === "waybill.main");
+            if (waybillPage && !waybillPage.fieldPermissions) {
+                waybillPage.fieldPermissions = {
+                    order_no: { visible: false, label: "订单号", category: "基础信息" },
+                    transfer_no: { visible: false, label: "转单号", category: "基础信息" },
+                    weight: { visible: false, label: "重量(kg)", category: "基础信息" },
+                    order_time: { visible: false, label: "下单时间", category: "基础信息" },
+                    product_name: { visible: false, label: "产品", category: "基础信息" },
+                    unit_customer_name: { visible: false, label: "单号客户", category: "客户信息" },
+                    first_leg_customer_name: { visible: false, label: "头程客户", category: "客户信息" },
+                    last_leg_customer_name: { visible: false, label: "尾程客户", category: "客户信息" },
+                    differential_customer_name: { visible: false, label: "差价客户", category: "客户信息" },
+                    supplier_name: { visible: false, label: "供应商", category: "供应商信息" },
+                    unit_fee: { visible: false, label: "单号收费", category: "费用信息" },
+                    first_leg_fee: { visible: false, label: "头程收费", category: "费用信息" },
+                    last_leg_fee: { visible: false, label: "尾程收费", category: "费用信息" },
+                    differential_fee: { visible: false, label: "差价收费", category: "费用信息" },
+                    supplier_cost: { visible: false, label: "供应商成本", category: "费用信息" },
+                    dedicated_line_fee: { visible: false, label: "专线处理费", category: "费用信息" },
+                    other_fee: { visible: false, label: "其他费用", category: "费用信息" },
+                    remark: { visible: false, label: "备注", category: "备注信息" }
+                };
+            }
+        },
         editRole(role) {
             this.isEdit = true;
             this.roleForm.id = role.id;
@@ -215,6 +344,12 @@ const RoleManagePage = {
                 p.canCreate = false;
                 p.canUpdate = false;
                 p.canDelete = false;
+                // 重置字段权限
+                if (p.pageKey === "waybill.main" && p.fieldPermissions) {
+                    Object.keys(p.fieldPermissions).forEach(key => {
+                        p.fieldPermissions[key].visible = false;
+                    });
+                }
             });
             
             // 加载角色的权限
@@ -226,6 +361,15 @@ const RoleManagePage = {
                         page.canCreate = perm.can_create;
                         page.canUpdate = perm.can_update;
                         page.canDelete = perm.can_delete;
+                        
+                        // 加载字段权限（如果存在）
+                        if (perm.field_permissions && page.fieldPermissions) {
+                            Object.keys(page.fieldPermissions).forEach(key => {
+                                if (perm.field_permissions[key] !== undefined) {
+                                    page.fieldPermissions[key].visible = perm.field_permissions[key];
+                                }
+                            });
+                        }
                     }
                 });
             }
@@ -262,6 +406,12 @@ const RoleManagePage = {
                 p.canCreate = false;
                 p.canUpdate = false;
                 p.canDelete = false;
+                // 重置字段权限
+                if (p.pageKey === "waybill.main" && p.fieldPermissions) {
+                    Object.keys(p.fieldPermissions).forEach(key => {
+                        p.fieldPermissions[key].visible = false;
+                    });
+                }
             });
         },
         validateForm() {
@@ -286,13 +436,26 @@ const RoleManagePage = {
                     body: JSON.stringify({
                         name: this.roleForm.name,
                         description: this.roleForm.description,
-                        permissions: this.rolePages.map(p => ({
-                            pageKey: p.pageKey,
-                            canView: p.canView,
-                            canCreate: p.canCreate,
-                            canUpdate: p.canUpdate,
-                            canDelete: p.canDelete,
-                        })),
+                        permissions: this.rolePages.map(p => {
+                            const permission = {
+                                pageKey: p.pageKey,
+                                canView: p.canView,
+                                canCreate: p.canCreate,
+                                canUpdate: p.canUpdate,
+                                canDelete: p.canDelete,
+                            };
+                            
+                            // 添加字段权限（仅对运单页面）
+                            if (p.pageKey === "waybill.main" && p.fieldPermissions) {
+                                const fieldPerms = {};
+                                Object.keys(p.fieldPermissions).forEach(key => {
+                                    fieldPerms[key] = p.fieldPermissions[key].visible;
+                                });
+                                permission.field_permissions = fieldPerms;
+                            }
+                            
+                            return permission;
+                        }),
                     }),
                 });
                 

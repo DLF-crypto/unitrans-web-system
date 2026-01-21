@@ -108,6 +108,8 @@ class Role(db.Model):
     )
 
 
+import json
+
 class RolePagePermission(db.Model):
     __tablename__ = "role_page_permissions"
 
@@ -118,6 +120,8 @@ class RolePagePermission(db.Model):
     can_create = db.Column(db.Boolean, default=False, nullable=False)
     can_update = db.Column(db.Boolean, default=False, nullable=False)
     can_delete = db.Column(db.Boolean, default=False, nullable=False)
+    # 存储字段级权限的JSON数据
+    field_permissions = db.Column(db.Text, nullable=True)  # JSON格式存储字段权限
 
 
 class User(db.Model):
@@ -528,13 +532,24 @@ def api_get_user_permissions():
     # 返回角色的权限列表
     permissions_data = []
     for perm in db_user.role.permissions:
-        permissions_data.append({
+        permission_item = {
             "page_key": perm.page_key,
             "can_view": perm.can_view,
             "can_create": perm.can_create,
             "can_update": perm.can_update,
             "can_delete": perm.can_delete,
-        })
+        }
+        
+        # 添加字段权限（如果存在）
+        if perm.field_permissions:
+            try:
+                permission_item["field_permissions"] = json.loads(perm.field_permissions)
+            except:
+                permission_item["field_permissions"] = {}
+        else:
+            permission_item["field_permissions"] = {}
+        
+        permissions_data.append(permission_item)
     
     return jsonify({
         "success": True,
@@ -634,8 +649,15 @@ def api_create_role():
         can_create = bool(item.get("canCreate"))
         can_update = bool(item.get("canUpdate"))
         can_delete = bool(item.get("canDelete"))
-        # 如果四个权限全为 False，就不保存该页面的记录
-        if not (can_view or can_create or can_update or can_delete):
+        
+        # 获取字段权限
+        field_permissions = item.get("field_permissions")
+        field_permissions_json = None
+        if field_permissions:
+            field_permissions_json = json.dumps(field_permissions)
+        
+        # 如果四个权限全为 False，且没有字段权限，就不保存该页面的记录
+        if not (can_view or can_create or can_update or can_delete) and not field_permissions_json:
             continue
 
         role.permissions.append(
@@ -645,6 +667,7 @@ def api_create_role():
                 can_create=can_create,
                 can_update=can_update,
                 can_delete=can_delete,
+                field_permissions=field_permissions_json
             )
         )
 
@@ -693,6 +716,8 @@ def api_get_roles():
                     "can_create": p.can_create,
                     "can_update": p.can_update,
                     "can_delete": p.can_delete,
+                    # 添加字段权限（如果存在）
+                    "field_permissions": json.loads(p.field_permissions) if p.field_permissions else {}
                 }
                 for p in role.permissions
             ],
@@ -747,7 +772,14 @@ def api_update_role(role_id):
         can_create = bool(item.get("canCreate"))
         can_update = bool(item.get("canUpdate"))
         can_delete = bool(item.get("canDelete"))
-        if not (can_view or can_create or can_update or can_delete):
+        
+        # 获取字段权限
+        field_permissions = item.get("field_permissions")
+        field_permissions_json = None
+        if field_permissions:
+            field_permissions_json = json.dumps(field_permissions)
+        
+        if not (can_view or can_create or can_update or can_delete) and not field_permissions_json:
             continue
 
         role.permissions.append(
@@ -757,6 +789,7 @@ def api_update_role(role_id):
                 can_create=can_create,
                 can_update=can_update,
                 can_delete=can_delete,
+                field_permissions=field_permissions_json
             )
         )
 

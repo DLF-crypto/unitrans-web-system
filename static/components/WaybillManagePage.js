@@ -129,64 +129,64 @@ const WaybillManagePage = {
 
             <!-- 表格显示区 -->
             <div class="table-scroll-container" style="width: 100%; overflow: auto; background: white; border: 1px solid var(--border-color); border-radius: 10px; max-height: calc(100vh - 360px); position: relative; display: block;">
-                <table class="data-table" style="min-width: 1800px; width: 100%; border-collapse: collapse; table-layout: auto;">
+                <table class="data-table" style="min-width: 1200px; width: 100%; border-collapse: collapse; table-layout: auto;">
                         <thead style="position: sticky; top: 0; z-index: 10; background: #f9fbf9;">
                         <tr>
                             <th rowspan="2" style="width: 50px; vertical-align: middle; border: 1px solid #c5ddd3;">
                                 <input type="checkbox" v-model="selectAll" @change="toggleSelectAll" />
                             </th>
                             <th rowspan="2" style="width: 60px; vertical-align: middle; border: 1px solid #c5ddd3;">序号</th>
-                            <th rowspan="2" style="width: 120px; vertical-align: middle; border: 1px solid #c5ddd3;">订单号</th>
-                            <th rowspan="2" style="width: 120px; vertical-align: middle; border: 1px solid #c5ddd3;">转单号</th>
-                            <th rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">重量(kg)</th>
-                            <th rowspan="2" style="width: 140px; vertical-align: middle; border: 1px solid #c5ddd3;">下单时间</th>
-                            <th rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">产品</th>
-                            <th colspan="4" style="font-weight: 600; border: 1px solid #c5ddd3;">客户信息</th>
-                            <th rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">供应商</th>
-                            <th colspan="4" style="font-weight: 600; border: 1px solid #c5ddd3;">应收费用</th>
-                            <th rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">供应商成本</th>
-                            <th rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">专线处理费</th>
-                            <th rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">其他费用</th>
-                            <th rowspan="2" style="width: 150px; vertical-align: middle; border: 1px solid #c5ddd3;">备注</th>
+                            <th v-if="userFieldPermissions.order_no" rowspan="2" style="width: 120px; vertical-align: middle; border: 1px solid #c5ddd3;">订单号</th>
+                            <th v-if="userFieldPermissions.transfer_no" rowspan="2" style="width: 120px; vertical-align: middle; border: 1px solid #c5ddd3;">转单号</th>
+                            <th v-if="userFieldPermissions.weight" rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">重量(kg)</th>
+                            <th v-if="userFieldPermissions.order_time" rowspan="2" style="width: 140px; vertical-align: middle; border: 1px solid #c5ddd3;">下单时间</th>
+                            <th v-if="userFieldPermissions.product_name" rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">产品</th>
+                            <th v-if="userFieldPermissions.unit_customer_name || userFieldPermissions.first_leg_customer_name || userFieldPermissions.last_leg_customer_name || userFieldPermissions.differential_customer_name" colspan="4" style="font-weight: 600; border: 1px solid #c5ddd3;">客户信息</th>
+                            <th v-if="userFieldPermissions.supplier_name" rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">供应商</th>
+                            <th v-if="userFieldPermissions.unit_fee || userFieldPermissions.first_leg_fee || userFieldPermissions.last_leg_fee || userFieldPermissions.differential_fee" colspan="4" style="font-weight: 600; border: 1px solid #c5ddd3;">应收费用</th>
+                            <th v-if="userFieldPermissions.supplier_cost" rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">供应商成本</th>
+                            <th v-if="userFieldPermissions.dedicated_line_fee" rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">专线处理费</th>
+                            <th v-if="userFieldPermissions.other_fee" rowspan="2" style="width: 100px; vertical-align: middle; border: 1px solid #c5ddd3;">其他费用</th>
+                            <th v-if="userFieldPermissions.remark" rowspan="2" style="width: 150px; vertical-align: middle; border: 1px solid #c5ddd3;">备注</th>
                         </tr>
                         <tr>
-                            <th style="width: 90px; border: 1px solid #c5ddd3;">单号客户</th>
-                            <th style="width: 90px; border: 1px solid #c5ddd3;">头程客户</th>
-                            <th style="width: 90px; border: 1px solid #c5ddd3;">尾程客户</th>
-                            <th style="width: 90px; border: 1px solid #c5ddd3;">差价客户</th>
-                            <th style="width: 90px; border: 1px solid #c5ddd3;">单号收费</th>
-                            <th style="width: 90px; border: 1px solid #c5ddd3;">头程收费</th>
-                            <th style="width: 90px; border: 1px solid #c5ddd3;">尾程收费</th>
-                            <th style="width: 90px; border: 1px solid #c5ddd3;">差价收费</th>
+                            <th v-if="userFieldPermissions.unit_customer_name" style="width: 90px; border: 1px solid #c5ddd3;">单号客户</th>
+                            <th v-if="userFieldPermissions.first_leg_customer_name" style="width: 90px; border: 1px solid #c5ddd3;">头程客户</th>
+                            <th v-if="userFieldPermissions.last_leg_customer_name" style="width: 90px; border: 1px solid #c5ddd3;">尾程客户</th>
+                            <th v-if="userFieldPermissions.differential_customer_name" style="width: 90px; border: 1px solid #c5ddd3;">差价客户</th>
+                            <th v-if="userFieldPermissions.unit_fee" style="width: 90px; border: 1px solid #c5ddd3;">单号收费</th>
+                            <th v-if="userFieldPermissions.first_leg_fee" style="width: 90px; border: 1px solid #c5ddd3;">头程收费</th>
+                            <th v-if="userFieldPermissions.last_leg_fee" style="width: 90px; border: 1px solid #c5ddd3;">尾程收费</th>
+                            <th v-if="userFieldPermissions.differential_fee" style="width: 90px; border: 1px solid #c5ddd3;">差价收费</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr v-if="waybills.length === 0">
-                            <td colspan="20" style="text-align: center; color: #999; padding: 40px; border: 1px solid var(--border-color);">暂无数据</td>
+                            <td :colspan="visibleColumnCount" style="text-align: center; color: #999; padding: 40px; border: 1px solid var(--border-color);">暂无数据</td>
                         </tr>
                         <tr v-for="(waybill, index) in waybills" :key="waybill.id">
                             <td style="border: 1px solid #e0e0e0;">
                                 <input type="checkbox" v-model="waybill.selected" />
                             </td>
                             <td style="border: 1px solid #e0e0e0;">{{ (pagination.currentPage - 1) * pagination.perPage + index + 1 }}</td>
-                            <td style="border: 1px solid #e0e0e0;">{{ waybill.order_no }}</td>
-                            <td style="border: 1px solid #e0e0e0;">{{ waybill.transfer_no }}</td>
-                            <td style="border: 1px solid #e0e0e0;">{{ waybill.weight.toFixed(3) }}</td>
-                            <td style="border: 1px solid #e0e0e0;">{{ formatDateTime(waybill.order_time) }}</td>
-                            <td style="border: 1px solid #e0e0e0;">{{ waybill.product_name }}</td>
-                            <td style="border: 1px solid #e0e0e0;">{{ waybill.unit_customer_name }}</td>
-                            <td style="border: 1px solid #e0e0e0;">{{ waybill.first_leg_customer_name }}</td>
-                            <td style="border: 1px solid #e0e0e0;">{{ waybill.last_leg_customer_name }}</td>
-                            <td style="border: 1px solid #e0e0e0;">{{ waybill.differential_customer_name }}</td>
-                            <td style="border: 1px solid #e0e0e0;">{{ waybill.supplier_name }}</td>
-                            <td style="border: 1px solid #e0e0e0; color: #2196F3; font-weight: 500;">{{ formatFee(waybill.unit_fee) }}</td>
-                            <td style="border: 1px solid #e0e0e0; color: #2196F3; font-weight: 500;">{{ formatFee(waybill.first_leg_fee) }}</td>
-                            <td style="border: 1px solid #e0e0e0; color: #2196F3; font-weight: 500;">{{ formatFee(waybill.last_leg_fee) }}</td>
-                            <td style="border: 1px solid #e0e0e0; color: #2196F3; font-weight: 500;">{{ formatFee(waybill.differential_fee) }}</td>
-                            <td style="border: 1px solid #e0e0e0; color: #f44336; font-weight: 500;">{{ formatFee(waybill.supplier_cost) }}</td>
-                            <td style="border: 1px solid #e0e0e0; color: #4CAF50; font-weight: 500;">{{ formatFee(waybill.dedicated_line_fee) }}</td>
-                            <td style="border: 1px solid #e0e0e0; color: #2196F3; font-weight: 500;">{{ formatFee(waybill.other_fee) }}</td>
-                            <td style="max-width: 200px; white-space: normal; overflow: hidden; text-overflow: ellipsis; text-align: left; border: 1px solid #e0e0e0;" :title="waybill.remark">{{ waybill.remark }}</td>
+                            <td v-if="userFieldPermissions.order_no" style="border: 1px solid #e0e0e0;">{{ waybill.order_no }}</td>
+                            <td v-if="userFieldPermissions.transfer_no" style="border: 1px solid #e0e0e0;">{{ waybill.transfer_no }}</td>
+                            <td v-if="userFieldPermissions.weight" style="border: 1px solid #e0e0e0;">{{ waybill.weight.toFixed(3) }}</td>
+                            <td v-if="userFieldPermissions.order_time" style="border: 1px solid #e0e0e0;">{{ formatDateTime(waybill.order_time) }}</td>
+                            <td v-if="userFieldPermissions.product_name" style="border: 1px solid #e0e0e0;">{{ waybill.product_name }}</td>
+                            <td v-if="userFieldPermissions.unit_customer_name" style="border: 1px solid #e0e0e0;">{{ waybill.unit_customer_name }}</td>
+                            <td v-if="userFieldPermissions.first_leg_customer_name" style="border: 1px solid #e0e0e0;">{{ waybill.first_leg_customer_name }}</td>
+                            <td v-if="userFieldPermissions.last_leg_customer_name" style="border: 1px solid #e0e0e0;">{{ waybill.last_leg_customer_name }}</td>
+                            <td v-if="userFieldPermissions.differential_customer_name" style="border: 1px solid #e0e0e0;">{{ waybill.differential_customer_name }}</td>
+                            <td v-if="userFieldPermissions.supplier_name" style="border: 1px solid #e0e0e0;">{{ waybill.supplier_name }}</td>
+                            <td v-if="userFieldPermissions.unit_fee" style="border: 1px solid #e0e0e0; color: #2196F3; font-weight: 500;">{{ formatFee(waybill.unit_fee) }}</td>
+                            <td v-if="userFieldPermissions.first_leg_fee" style="border: 1px solid #e0e0e0; color: #2196F3; font-weight: 500;">{{ formatFee(waybill.first_leg_fee) }}</td>
+                            <td v-if="userFieldPermissions.last_leg_fee" style="border: 1px solid #e0e0e0; color: #2196F3; font-weight: 500;">{{ formatFee(waybill.last_leg_fee) }}</td>
+                            <td v-if="userFieldPermissions.differential_fee" style="border: 1px solid #e0e0e0; color: #2196F3; font-weight: 500;">{{ formatFee(waybill.differential_fee) }}</td>
+                            <td v-if="userFieldPermissions.supplier_cost" style="border: 1px solid #e0e0e0; color: #f44336; font-weight: 500;">{{ formatFee(waybill.supplier_cost) }}</td>
+                            <td v-if="userFieldPermissions.dedicated_line_fee" style="border: 1px solid #e0e0e0; color: #4CAF50; font-weight: 500;">{{ formatFee(waybill.dedicated_line_fee) }}</td>
+                            <td v-if="userFieldPermissions.other_fee" style="border: 1px solid #e0e0e0; color: #2196F3; font-weight: 500;">{{ formatFee(waybill.other_fee) }}</td>
+                            <td v-if="userFieldPermissions.remark" style="max-width: 200px; white-space: normal; overflow: hidden; text-overflow: ellipsis; text-align: left; border: 1px solid #e0e0e0;" :title="waybill.remark">{{ waybill.remark }}</td>
                         </tr>
                     </tbody>
                 </table>
@@ -312,10 +312,31 @@ const WaybillManagePage = {
             selectedFile: null,
             importing: false,
             importErrors: null,
-            recalculating: false
+            recalculating: false,
+            userFieldPermissions: {
+                order_no: true,
+                transfer_no: true,
+                weight: true,
+                order_time: true,
+                product_name: true,
+                unit_customer_name: true,
+                first_leg_customer_name: true,
+                last_leg_customer_name: true,
+                differential_customer_name: true,
+                supplier_name: true,
+                unit_fee: true,
+                first_leg_fee: true,
+                last_leg_fee: true,
+                differential_fee: true,
+                supplier_cost: true,
+                dedicated_line_fee: true,
+                other_fee: true,
+                remark: true
+            }
         };
     },
     mounted() {
+        this.loadUserFieldPermissions();
         this.loadCustomers();
         this.loadSuppliers();
         this.loadProducts();
@@ -324,9 +345,61 @@ const WaybillManagePage = {
     computed: {
         hasSelected() {
             return this.waybills.some(w => w.selected);
+        },
+        visibleColumnCount() {
+            let count = 2; // 序号和选择框列
+            if (this.userFieldPermissions.order_no) count++;
+            if (this.userFieldPermissions.transfer_no) count++;
+            if (this.userFieldPermissions.weight) count++;
+            if (this.userFieldPermissions.order_time) count++;
+            if (this.userFieldPermissions.product_name) count++;
+            
+            // 计算客户信息列
+            const customerColumns = [
+                'unit_customer_name', 'first_leg_customer_name', 
+                'last_leg_customer_name', 'differential_customer_name'
+            ];
+            const visibleCustomerCols = customerColumns.filter(col => this.userFieldPermissions[col]).length;
+            if (visibleCustomerCols > 0) count += 4; // 客户信息占4列，即使只有部分显示
+            
+            if (this.userFieldPermissions.supplier_name) count++;
+            
+            // 计算费用列
+            const feeColumns = [
+                'unit_fee', 'first_leg_fee', 
+                'last_leg_fee', 'differential_fee'
+            ];
+            const visibleFeeCols = feeColumns.filter(col => this.userFieldPermissions[col]).length;
+            if (visibleFeeCols > 0) count += 4; // 应收费用占4列，即使只有部分显示
+            
+            if (this.userFieldPermissions.supplier_cost) count++;
+            if (this.userFieldPermissions.dedicated_line_fee) count++;
+            if (this.userFieldPermissions.other_fee) count++;
+            if (this.userFieldPermissions.remark) count++;
+            
+            return count;
         }
     },
     methods: {
+        async loadUserFieldPermissions() {
+            try {
+                const res = await fetch('/api/user-permissions');
+                const data = await res.json();
+                if (data.success && data.pages) {
+                    // 查找运单管理页面的字段权限
+                    const waybillPerm = data.pages.find(p => p.page_key === 'waybill.main');
+                    if (waybillPerm && waybillPerm.field_permissions) {
+                        this.userFieldPermissions = {
+                            ...this.userFieldPermissions,
+                            ...waybillPerm.field_permissions
+                        };
+                    }
+                }
+            } catch (e) {
+                console.error('加载用户字段权限失败', e);
+            }
+        },
+
         async loadCustomers() {
             try {
                 const res = await fetch("/api/customers");
