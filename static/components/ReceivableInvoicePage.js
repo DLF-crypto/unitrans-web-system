@@ -134,6 +134,13 @@ const ReceivableInvoicePage = {
                 </div>
                 <div class="modal-body">
                     <div class="form-field">
+                        <label>客户名称</label>
+                        <select v-model="generateForm.customer_id" class="form-input">
+                            <option value="">所有客户</option>
+                            <option v-for="c in customers" :key="c.id" :value="c.id">{{ c.full_name }}</option>
+                        </select>
+                    </div>
+                    <div class="form-field">
                         <label>年份</label>
                         <select v-model="generateForm.year" class="form-input">
                             <option v-for="y in yearOptions" :key="y" :value="y">{{ y }}年</option>
@@ -171,6 +178,7 @@ const ReceivableInvoicePage = {
             isGenerating: false,
             currentTaskId: null,
             generateForm: {
+                customer_id: '',
                 year: new Date().getFullYear(),
                 month: new Date().getMonth() + 1
             },

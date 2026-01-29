@@ -9,11 +9,9 @@ from dotenv import load_dotenv
 import os
 load_dotenv()
 import json
-
 from flask import Flask, render_template, redirect, url_for, request, jsonify, session, send_file, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from celery import Celery
-
 from waybill_import_handler import (
     validate_and_process_waybill_import,
     calculate_waybill_fees
@@ -24,14 +22,14 @@ app = Flask(__name__)
 app.secret_key = "dev-change-this-secret"  # 用于会话管理，后续可根据需要修改
 
 # Celery 配置
-app.config['CELERY_BROKER_URL'] = 'redis://127.0.0.1:6379/0'
-app.config['CELERY_RESULT_BACKEND'] = 'redis://127.0.0.1:6379/0'
+app.config['broker_url'] = 'redis://127.0.0.1:6379/0'
+app.config['result_backend'] = 'redis://127.0.0.1:6379/0'
 
 def make_celery(app):
     celery = Celery(
         app.import_name,
-        backend=app.config['CELERY_RESULT_BACKEND'],
-        broker=app.config['CELERY_BROKER_URL']
+        backend=app.config.get('result_backend', 'redis://127.0.0.1:6379/0'),
+        broker=app.config.get('broker_url', 'redis://127.0.0.1:6379/0')
     )
     celery.conf.update(app.config)
 
@@ -44,6 +42,29 @@ def make_celery(app):
     return celery
 
 celery = make_celery(app)
+
+# 配置Celery Beat定时任务
+from celery.schedules import crontab
+
+celery.conf.beat_schedule = {
+    # 每小时执行一次自动获取轨迹
+    'auto-fetch-tracking-hourly': {
+        'task': 'app.auto_fetch_tracking_task',
+        'schedule': crontab(minute=0),  # 每小时的0分钟执行
+    },
+}
+
+celery.conf.timezone = 'UTC'
+
+# Celery任务路由配置（注释掉，使用默认celery队列）
+# celery.conf.task_routes = {
+#     'app.async_fetch_tracking_task': {'queue': 'tracking'},
+#     'app.async_fetch_lastmile_tracking_task': {'queue': 'tracking'},
+# }
+
+# 并发控制
+celery.conf.worker_prefetch_multiplier = 1  # 每次只预取一个任务
+celery.conf.task_acks_late = True  # 任务执行完才确认
 
 # 上传文件配置
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
@@ -62,8 +83,6 @@ SUPPLIER_INVOICE_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)
 if not os.path.exists(SUPPLIER_INVOICE_FOLDER):
     os.makedirs(SUPPLIER_INVOICE_FOLDER)
 app.config['SUPPLIER_INVOICE_FOLDER'] = SUPPLIER_INVOICE_FOLDER
-
-import os
 
 # 数据库配置 - 使用环境变量
 DB_USER = os.environ.get('DB_USER', 'root')  # 本地使用 root
@@ -108,8 +127,6 @@ class Role(db.Model):
     )
 
 
-import json
-
 class RolePagePermission(db.Model):
     __tablename__ = "role_page_permissions"
 
@@ -151,9 +168,15 @@ class Product(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(128), nullable=False)
     description = db.Column(db.String(300))  # 产品描述，允许为空
-    # 收费类别：用逗号分隔，如："单号收费,头程收费"
+    # 收费类别：用逗号分隔，如：“单号收费,头程收费”
     fee_types = db.Column(db.String(255), nullable=False)
+    supplier_id = db.Column(db.Integer, db.ForeignKey("suppliers.id"))  # 绑定的供应商ID（仅当有差价收费时）
+    tracking_interface_id = db.Column(db.Integer, db.ForeignKey("tracking_interfaces.id"))  # 绑定的轨迹接口ID（仅当有尾程收费时）
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    
+    # 关联供应商和轨迹接口
+    supplier = db.relationship("Supplier", backref="products", lazy="joined")
+    tracking_interface = db.relationship("TrackingInterface", backref="products", lazy="joined")
 
 
 class Customer(db.Model):
@@ -180,6 +203,89 @@ class Supplier(db.Model):
     email = db.Column(db.String(128))  # 邮箱
     remark = db.Column(db.String(500))  # 备注
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
+class TrackingNode(db.Model):
+    """轨迹节点状态管理"""
+    __tablename__ = "tracking_nodes"
+
+    id = db.Column(db.Integer, primary_key=True)
+    status_code = db.Column(db.String(32), unique=True, nullable=False)  # 状态代码
+    status_description = db.Column(db.String(128), nullable=False)  # 状态说明
+    default_city = db.Column(db.String(64))  # 默认城市
+    default_country_code = db.Column(db.String(3))  # 默认国家代码（如：CN、US）
+    default_airport_code = db.Column(db.String(3))  # 默认机场三字代码（如：PVG、LAX）
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
+class TrackingInterface(db.Model):
+    """轨迹接口管理"""
+    __tablename__ = "tracking_interfaces"
+
+    id = db.Column(db.Integer, primary_key=True)
+    interface_name = db.Column(db.String(128), unique=True, nullable=False)  # 轨迹接口名称
+    request_url = db.Column(db.String(512), nullable=False)  # 轨迹请求地址
+    auth_params = db.Column(db.Text)  # 轨迹接口验证信息，JSON格式：{"api_id":"123456","key":"xxxx"}
+    status_mapping = db.Column(db.Text)  # 头程状态映射表，JSON格式：[{"supplier_status":"xxx","supplier_description":"","system_status_code":"xxx"},...]
+    response_key_params = db.Column(db.Text)  # 关键信息代码参数，JSON格式：{"time_key":"changeDate","status_key":"status","description_key":"record","city_key":"city","country_key":"country"}
+    fetch_interval = db.Column(db.Numeric(5, 2), nullable=False)  # 获取频率（小时），如 1.2 表示 1小时12分钟
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
+class LastmileStatusMapping(db.Model):
+    """尾程轨迹状态映射表（独立表）"""
+    __tablename__ = "lastmile_status_mappings"
+
+    id = db.Column(db.Integer, primary_key=True)
+    description = db.Column(db.String(255), nullable=True, index=True, default='')  # 尾程轨迹描述（对应报文的"description"），非必填
+    sub_status = db.Column(db.String(64), nullable=False, index=True)  # 尾程轨迹状态（对应报文的"sub_status"）
+    system_status_code = db.Column(db.String(32), nullable=False)  # 系统状态代码
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    
+    # 不再使用唯一约束，因为 description 可以为空，后端代码会手动检查重复
+
+
+class TrackingInfo(db.Model):
+    """轨迹信息存储"""
+    __tablename__ = "tracking_info"
+
+    id = db.Column(db.Integer, primary_key=True)
+    waybill_id = db.Column(db.Integer, db.ForeignKey("waybills.id"), nullable=False, index=True)  # 运单ID
+    order_no = db.Column(db.String(64), nullable=False, index=True)  # 订单号
+    transfer_no = db.Column(db.String(64), index=True)  # 转单号
+    tracking_interface_id = db.Column(db.Integer, db.ForeignKey("tracking_interfaces.id"), nullable=False)  # 轨迹接口ID
+    
+    tracking_description = db.Column(db.Text)  # 轨迹描述
+    status_code = db.Column(db.String(32))  # 轨迹状态代码（系统状态代码）
+    tracking_time = db.Column(db.DateTime)  # 时间节点
+    
+    raw_response = db.Column(db.Text)  # 接口原始报文(JSON格式)
+    
+    last_fetch_time = db.Column(db.DateTime)  # 最新获取时间（从供应商接口获取）
+    last_push_time = db.Column(db.DateTime)  # 最新推送时间（推送到上家）
+    
+    # 停止自动跟踪相关字段
+    stop_tracking = db.Column(db.Boolean, default=False)  # 是否停止自动跟踪
+    stop_tracking_reason = db.Column(db.String(255))  # 停止跟踪原因
+    stop_tracking_time = db.Column(db.DateTime)  # 停止跟踪时间
+    
+    # 尾程轨迹相关字段
+    lastmile_no = db.Column(db.String(64), index=True)  # 尾程单号
+    lastmile_raw_response = db.Column(db.Text)  # 尾程接口原始报文(JSON格式)，兼容字段
+    lastmile_last_fetch_time = db.Column(db.DateTime)  # 尾程最新获取时间
+    lastmile_register_response = db.Column(db.Text(length=4294967295))  # 尾程注册报文(JSON格式) - LONGTEXT
+    lastmile_tracking_response = db.Column(db.Text(length=4294967295))  # 尾程单号报文(JSON格式) - LONGTEXT
+    
+    # 推送报文（JSON数组，存储所有轨迹节点）
+    push_events = db.Column(db.Text(length=4294967295))  # 推送报文(JSON格式) - LONGTEXT
+    szpost_response = db.Column(db.Text(length=4294967295))  # 深邮响应报文(JSON格式) - LONGTEXT
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # 关联关系
+    waybill = db.relationship("Waybill", backref="tracking_info", lazy="joined")
+    tracking_interface = db.relationship("TrackingInterface", backref="tracking_records", lazy="joined")
 
 
 class CustomerQuote(db.Model):
@@ -344,10 +450,117 @@ USERS = {
 }
 
 
+# ==================== 停止跟踪相关函数 ====================
+
+def should_stop_tracking(waybill, tracking_info):
+    """
+    检查是否应该停止跟踪
+    
+    停止条件：
+    1. 运单导入系统超过45天
+    2. 运单状态代码是O_016
+    3. 运单停止更新超过20天
+    
+    Args:
+        waybill: Waybill对象
+        tracking_info: TrackingInfo对象，可能为None
+    
+    Returns:
+        tuple: (should_stop: bool, reason: str or None)
+    """
+    now = datetime.utcnow()
+    
+    # 条件1：运单导入系统超过45天
+    if waybill.created_at:
+        days_since_import = (now - waybill.created_at).days
+        if days_since_import > 45:
+            return True, f"运单导入超过45天（{days_since_import}天）"
+    
+    # 条件2：状态代码是O_016
+    if tracking_info and tracking_info.status_code == 'O_016':
+        return True, "状态代码为O_016"
+    
+    # 条件3：停止更新超过20天
+    if tracking_info and tracking_info.updated_at:
+        days_since_update = (now - tracking_info.updated_at).days
+        if days_since_update > 20:
+            return True, f"停止更新超过20天（{days_since_update}天）"
+    
+    return False, None
+
+
+def batch_check_stop_tracking():
+    """
+    批量检查所有运单，标记满足停止条件的运单
+    该函数可用于定时任务
+    
+    Returns:
+        dict: 包含处理结果的字典
+    """
+    stopped_count = 0
+    checked_count = 0
+    
+    # 查询所有未停止跟踪的运单
+    query = db.session.query(
+        Waybill,
+        TrackingInfo
+    ).outerjoin(
+        TrackingInfo, Waybill.id == TrackingInfo.waybill_id
+    ).filter(
+        db.or_(
+            TrackingInfo.stop_tracking == False,
+            TrackingInfo.stop_tracking.is_(None)
+        )
+    )
+    
+    for waybill, tracking_info in query.all():
+        checked_count += 1
+        should_stop, reason = should_stop_tracking(waybill, tracking_info)
+        
+        if should_stop:
+            if tracking_info:
+                # 更新现有轨迹记录
+                tracking_info.stop_tracking = True
+                tracking_info.stop_tracking_reason = reason
+                tracking_info.stop_tracking_time = datetime.utcnow()
+                stopped_count += 1
+            else:
+                # 如果还没有轨迹记录，也需要创建一个标记为停止
+                # 这种情况可能是运单导入后从未获取过轨迹，但已超过45天
+                # 获取产品的轨迹接口ID
+                if waybill.product and waybill.product.tracking_interface_id:
+                    new_tracking = TrackingInfo(
+                        waybill_id=waybill.id,
+                        order_no=waybill.order_no,
+                        transfer_no=waybill.transfer_no,
+                        tracking_interface_id=waybill.product.tracking_interface_id,
+                        stop_tracking=True,
+                        stop_tracking_reason=reason,
+                        stop_tracking_time=datetime.utcnow()
+                    )
+                    db.session.add(new_tracking)
+                    stopped_count += 1
+    
+    try:
+        db.session.commit()
+        return {
+            "success": True,
+            "checked_count": checked_count,
+            "stopped_count": stopped_count,
+            "message": f"检查了 {checked_count} 条运单，标记停止跟踪 {stopped_count} 条"
+        }
+    except Exception as e:
+        db.session.rollback()
+        return {
+            "success": False,
+            "message": f"批量检查失败: {str(e)}"
+        }
+
+
 # ==================== Celery 异步任务 ====================
 
 @celery.task(bind=True, name='app.async_generate_customer_invoices')
-def async_generate_customer_invoices(self, year, month):
+def async_generate_customer_invoices(self, year, month, customer_id=None):
     """异步生成客户账单任务"""
     import logging
     logger = logging.getLogger(__name__)
@@ -364,7 +577,7 @@ def async_generate_customer_invoices(self, year, month):
             else:
                 logger.warning("未找到任务记录")
             
-            logger.info(f"步骤 3: 开始生成账单 {year}-{month}")
+            logger.info(f"步骤 3: 开始生成账单 {year}-{month}, customer_id={customer_id}")
             invoice_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'customer invoices')
             logger.info(f"账单目录: {invoice_folder}")
             
@@ -374,7 +587,7 @@ def async_generate_customer_invoices(self, year, month):
                 'Customer': Customer,
                 'Invoice': Invoice,
                 'CustomerQuote': CustomerQuote
-            }, invoice_folder)
+            }, invoice_folder, customer_id=customer_id)
             
             logger.info(f"步骤 4: 账单生成完成，数量: {count}")
             
@@ -436,6 +649,816 @@ def async_generate_supplier_invoices(self, year, month):
                 task_record.result_msg = str(e)
                 db.session.commit()
             raise e
+
+
+def generate_push_events(tracking, interface, raw_response_json):
+    """
+    生成推送报文（头程轨迹）
+    
+    Args:
+        tracking: TrackingInfo 对象
+        interface: TrackingInterface 对象
+        raw_response_json: 原始报文 JSON 对象
+    
+    Returns:
+        list: 推送事件列表
+    """
+    import json
+    from datetime import datetime
+    
+    push_events = []
+    
+    try:
+        # 解析关键信息代码参数
+        response_key_params = json.loads(interface.response_key_params) if interface.response_key_params else {}
+        time_key = response_key_params.get('time_key', 'changeDate')  # 默认为changeDate
+        status_key = response_key_params.get('status_key', 'status')
+        description_key = response_key_params.get('description_key', 'record')
+        # city_key 和 country_key 不使用默认值，空字符串就是空
+        city_key = response_key_params.get('city_key', '')
+        country_key = response_key_params.get('country_key', '')
+        
+        # 解析头程状态映射表
+        status_mapping = json.loads(interface.status_mapping) if interface.status_mapping else []
+        
+        # 遍历轨迹节点 - 修复：进入 trackInfo 数组
+        tracks = raw_response_json.get('tracks', [])
+        for track in tracks:
+            track_info_list = track.get('trackInfo', [])
+            
+            for track_info in track_info_list:
+                # 提取时间戳并转换为 ISO 格式（北京时间）
+                time_value = track_info.get(time_key)
+                tracking_time = ''
+                if time_value:
+                    try:
+                        # 如果是数值类型，则转换为时间格式（假设为毫秒时间戳）
+                        if isinstance(time_value, (int, float)):
+                            from datetime import timedelta
+                            dt = datetime.utcfromtimestamp(time_value / 1000)
+                            # 转换为北京时间 (UTC+8)
+                            dt_beijing = dt + timedelta(hours=8)
+                            tracking_time = dt_beijing.isoformat()
+                        # 如果已经是字符串格式
+                        elif isinstance(time_value, str):
+                            # 如果包含 Z 后缀，说明是 UTC 时间，需要转换
+                            if time_value.endswith('Z'):
+                                from datetime import timedelta
+                                dt = datetime.fromisoformat(time_value.replace('Z', '+00:00'))
+                                # 转换为北京时间 (UTC+8)
+                                dt_beijing = dt + timedelta(hours=8)
+                                tracking_time = dt_beijing.replace(tzinfo=None).isoformat()
+                            else:
+                                # 已经是北京时间或无时区信息，直接使用
+                                tracking_time = time_value
+                    except:
+                        tracking_time = ''
+                
+                supplier_status = str(track_info.get(status_key, ''))
+                supplier_description = track_info.get(description_key, '')
+                
+                # 匹配系统状态代码：优先匹配轨迹描述，其次匹配状态代码
+                system_status_code = ''
+                
+                # 第1优先级：用 record 匹配映射表中的 supplier_description（包含匹配）
+                if supplier_description:
+                    for mapping in status_mapping:
+                        mapping_desc = mapping.get('supplier_description', '').strip()
+                        if mapping_desc and mapping_desc in supplier_description.strip():
+                            system_status_code = mapping.get('system_status_code', '')
+                            break
+                
+                # 第2优先级：如果描述没匹配到，用 status 匹配 supplier_status
+                if not system_status_code:
+                    for mapping in status_mapping:
+                        if str(mapping.get('supplier_status', '')) == supplier_status:
+                            system_status_code = mapping.get('system_status_code', '')
+                            break
+                
+                # 根据匹配到的 system_status_code 获取该状态码的默认城市和国家
+                default_city = ''
+                default_country = ''
+                if system_status_code:
+                    node = TrackingNode.query.filter_by(status_code=system_status_code).first()
+                    if node:
+                        default_city = node.default_city or ''
+                        default_country = node.default_country_code or ''
+                
+                # 从关键参数指定的字段提取城市和国家
+                city = ''
+                country = ''
+                if city_key:
+                    city = track_info.get(city_key, '')
+                if country_key:
+                    country = track_info.get(country_key, '')
+                
+                # 如果提取到的城市/国家为空，使用该状态码的默认值
+                if not city:
+                    city = default_city
+                if not country:
+                    country = default_country
+                
+                # 只有匹配到状态代码时才生成推送事件
+                if system_status_code:
+                    event = {
+                        'order_no': tracking.order_no,
+                        'tracking_time': tracking_time,
+                        'status_code': system_status_code,
+                        'description': supplier_description,
+                        'city': city,
+                        'country': country,
+                        'source': 'headhaul'  # 标记来源为头程
+                    }
+                    push_events.append(event)
+    
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"生成头程推送报文失败: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+    
+    return push_events
+
+
+def merge_lastmile_push_events(tracking, existing_events):
+    """
+    合并尾程轨迹到推送报文
+    
+    Args:
+        tracking: TrackingInfo 对象
+        existing_events: 现有的推送事件列表
+    
+    Returns:
+        list: 合并后的推送事件列表
+    """
+    import json
+    from datetime import datetime
+    
+    if not tracking.lastmile_tracking_response:
+        return existing_events
+    
+    try:
+        lastmile_data = json.loads(tracking.lastmile_tracking_response)
+        lastmile_tracks = lastmile_data.get('data', {}).get('accepted', [])
+        
+        # 解析尾程轨迹（只处理当前订单的尾程单号）
+        for track_item in lastmile_tracks:
+            # 检查是否为当前订单的尾程单号
+            track_number = track_item.get('number', '')
+            if track_number != tracking.lastmile_no:
+                # 跳过不属于当前订单的尾程单号
+                continue
+            
+            track_info = track_item.get('track_info', {})
+            tracking_detail = track_info.get('tracking', {}).get('providers', [{}])[0] if track_info.get('tracking') else {}
+            events = tracking_detail.get('events', [])
+            
+            for event in events:
+                time_iso = event.get('time_iso', '')
+                
+                # 将 ISO 8601 格式转换为 yyyy-MM-dd HH:mm:ss
+                tracking_time = ''
+                if time_iso:
+                    try:
+                        from datetime import datetime
+                        # 解析 ISO 8601 格式（带时区）
+                        dt = datetime.fromisoformat(time_iso.replace('Z', '+00:00'))
+                        # 转换为 yyyy-MM-dd HH:mm:ss 格式
+                        tracking_time = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    except:
+                        tracking_time = time_iso
+                
+                sub_status = event.get('sub_status', '')
+                description = event.get('description', '')
+                
+                # 从 address 对象中提取 city 和 country
+                address = event.get('address', {})
+                city = ''
+                country = ''
+                
+                if isinstance(address, dict):
+                    city = address.get('city', '')
+                    country = address.get('country', '')
+                
+                # 如果 country 为空，默认使用 US
+                if not country:
+                    country = 'US'
+                
+                # 如果 address 中没有 city，尝试从 location 解析（降级方案）
+                if not city:
+                    location = event.get('location', {})
+                    if isinstance(location, dict):
+                        city = location.get('city', '')
+                    elif isinstance(location, str):
+                        # location 是字符串，可能为 "ALTOONA, PA, US" 类型格式
+                        city = location
+                
+                # 匹配系统状态代码（使用尾程映射表）
+                system_status_code = ''
+                matched_node = None
+                
+                # 优先匹配 description
+                if description:
+                    mapping = LastmileStatusMapping.query.filter_by(
+                        description=description,
+                        sub_status=sub_status
+                    ).first()
+                    if mapping:
+                        system_status_code = mapping.system_status_code
+                        # 获取对应的轨迹节点
+                        matched_node = TrackingNode.query.filter_by(status_code=system_status_code).first()
+                
+                # 如果没匹配到，直接匹配 sub_status
+                if not system_status_code:
+                    mapping = LastmileStatusMapping.query.filter(
+                        LastmileStatusMapping.sub_status == sub_status,
+                        db.or_(
+                            LastmileStatusMapping.description == '',
+                            LastmileStatusMapping.description.is_(None)
+                        )
+                    ).first()
+                    if mapping:
+                        system_status_code = mapping.system_status_code
+                        # 获取对应的轨迹节点
+                        matched_node = TrackingNode.query.filter_by(status_code=system_status_code).first()
+                
+                # 如果 city 或 country 为空，使用轨迹节点的默认值
+                if matched_node:
+                    if not city:
+                        city = matched_node.default_city or ''
+                    if not country or country == 'US':  # 如果是默认的 US，尝试使用节点的默认国家
+                        if matched_node.default_country_code:
+                            country = matched_node.default_country_code
+                
+                # 检查是否与头程轨迹时间相同或状态码相同
+                # 如果时间相同或状态码相同，删除头程轨迹，只保留尾程
+                for i in range(len(existing_events) - 1, -1, -1):  # 从后往前遍历，安全删除
+                    existing_event = existing_events[i]
+                    # 删除条件：1) 时间相同  2) 状态码相同且都是头程
+                    if (existing_event.get('tracking_time') == tracking_time or 
+                        (existing_event.get('status_code') == system_status_code and 
+                         existing_event.get('source') == 'headhaul')):
+                        del existing_events[i]
+                
+                # 只有匹配到状态代码时才添加尾程事件
+                if system_status_code:
+                    new_event = {
+                        'order_no': tracking.order_no,
+                        'tracking_time': tracking_time,
+                        'status_code': system_status_code,
+                        'description': description,
+                        'city': city,
+                        'country': country,
+                        'source': 'lastmile'
+                    }
+                    existing_events.append(new_event)
+    
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"合并尾程推送报文失败: {str(e)}")
+    
+    # 按时间排序
+    existing_events.sort(key=lambda x: x.get('tracking_time', ''))
+    
+    return existing_events
+
+
+@celery.task(bind=True, name='app.async_fetch_tracking_task')
+def async_fetch_tracking_task(self, waybill_ids):
+    """
+    异步获取头程轨迹任务
+    
+    Args:
+        waybill_ids: 运单ID列表
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[异步轨迹] 任务启动，ID: {self.request.id}, 运单数: {len(waybill_ids)}")
+    
+    with app.app_context():
+        try:
+            # 更新任务状态
+            task_record = TaskRecord.query.filter_by(task_id=self.request.id).first()
+            if task_record:
+                task_record.status = 'PROCESSING'
+                db.session.commit()
+            
+            from tracking_handler.tracking_handler_manager import batch_fetch_tracking_by_interface
+            import json
+            from datetime import datetime
+            
+            # 按轨迹接口分组
+            interface_groups = {}
+            
+            for waybill_id in waybill_ids:
+                tracking = TrackingInfo.query.filter_by(waybill_id=waybill_id).first()
+                if not tracking or not tracking.tracking_interface_id:
+                    continue
+                
+                interface_id = tracking.tracking_interface_id
+                if interface_id not in interface_groups:
+                    interface_groups[interface_id] = []
+                
+                interface_groups[interface_id].append({
+                    'waybill_id': waybill_id,
+                    'order_no': tracking.order_no,
+                    'transfer_no': tracking.transfer_no
+                })
+            
+            total_success = 0
+            total_failed = 0
+            error_details = []
+            now = datetime.utcnow()
+            
+            # 按接口批量处理
+            for interface_id, waybill_list in interface_groups.items():
+                interface = TrackingInterface.query.get(interface_id)
+                if not interface:
+                    continue
+                
+                logger.info(f"[异步轨迹] 处理接口: {interface.interface_name}, 运单数: {len(waybill_list)}")
+                
+                interface_config = {
+                    'interface_name': interface.interface_name,
+                    'request_url': interface.request_url,
+                    'auth_params': interface.auth_params
+                }
+                
+                status_mapping = json.loads(interface.status_mapping) if interface.status_mapping else []
+                response_key_params = json.loads(interface.response_key_params) if interface.response_key_params else None
+                
+                # 批量获取轨迹
+                results = batch_fetch_tracking_by_interface(
+                    waybill_list,
+                    interface_config,
+                    status_mapping,
+                    response_key_params
+                )
+                
+                # 更新数据库
+                for result in results:
+                    waybill_id = result.get('waybill_id')
+                    if result.get('success'):
+                        tracking = TrackingInfo.query.filter_by(waybill_id=waybill_id).first()
+                        if tracking:
+                            tracking.tracking_description = result.get('tracking_description', '')
+                            tracking.status_code = result.get('status_code', '')
+                            tracking.tracking_time = result.get('tracking_time')
+                            tracking.raw_response = result.get('raw_response', '')
+                            tracking.last_fetch_time = now
+                            
+                            # 从 json中提取尾程单号并保存
+                            try:
+                                raw_data = json.loads(result.get('raw_response', '{}'))
+                                if "tracks" in raw_data and raw_data["tracks"]:
+                                    lastmile_no = raw_data["tracks"][0].get("transferNo", "")
+                                    if lastmile_no:
+                                        tracking.lastmile_no = lastmile_no
+                                
+                                # 生成推送报文
+                                push_events = generate_push_events(tracking, interface, raw_data)
+                                
+                                # 如果已有尾程轨迹，合并
+                                if tracking.lastmile_tracking_response:
+                                    push_events = merge_lastmile_push_events(tracking, push_events)
+                                
+                                # 保存推送报文
+                                tracking.push_events = json.dumps(push_events, ensure_ascii=False)
+                                
+                            except Exception as e:
+                                logger.error(f"生成推送报文失败: {str(e)}")
+                            
+                            total_success += 1
+                            logger.info(f"[异步轨迹] 运单 {result.get('order_no')} 获取成功")
+                    else:
+                        total_failed += 1
+                        error_msg = f"运单ID {waybill_id}: {result.get('message')}"
+                        error_details.append(error_msg)
+                        logger.warning(f"[异步轨迹] {error_msg}")
+            
+            db.session.commit()
+            
+            # 更新任务状态
+            if task_record:
+                task_record.status = 'SUCCESS'
+                task_record.result_msg = f"成功: {total_success}单, 失败: {total_failed}单"
+                db.session.commit()
+            
+            logger.info(f"[异步轨迹] 任务完成，成功: {total_success}, 失败: {total_failed}")
+            
+            return {
+                "success": True,
+                "total_success": total_success,
+                "total_failed": total_failed,
+                "error_details": error_details,
+                "message": f"成功获取 {total_success} 条轨迹数据"
+            }
+            
+        except Exception as e:
+            logger.error(f"[异步轨迹] 任务异常: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            if task_record:
+                task_record.status = 'FAILURE'
+                task_record.result_msg = str(e)
+                db.session.commit()
+            
+            raise
+
+
+@celery.task(bind=True, name='app.async_fetch_lastmile_tracking_task')
+def async_fetch_lastmile_tracking_task(self, waybill_ids):
+    """
+    异步获取尾程轨迹任务
+    
+    Args:
+        waybill_ids: 运单ID列表
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[异步尾程轨迹] 任务启动，ID: {self.request.id}, 运单数: {len(waybill_ids)}")
+    
+    with app.app_context():
+        try:
+            # 更新任务状态
+            task_record = TaskRecord.query.filter_by(task_id=self.request.id).first()
+            if task_record:
+                task_record.status = 'PROCESSING'
+                db.session.commit()
+            
+            from tracking_handler.tracking_lastmile_handler import batch_fetch_lastmile_tracking, fetch_lastmile_tracking
+            from datetime import datetime
+            import json
+            
+            # 查询运单和尾程单号
+            waybills = db.session.query(
+                Waybill.id,
+                Waybill.order_no,
+                TrackingInfo.id.label('tracking_id'),
+                TrackingInfo.lastmile_no,
+                TrackingInfo.lastmile_register_response
+            ).outerjoin(
+                TrackingInfo, Waybill.id == TrackingInfo.waybill_id
+            ).filter(
+                Waybill.id.in_(waybill_ids)
+            ).all()
+            
+            already_registered_list = []
+            to_register_list = []
+            
+            for wb in waybills:
+                if wb.lastmile_no:
+                    tracking = TrackingInfo.query.get(wb.tracking_id)
+                    if tracking and tracking.lastmile_register_response:
+                        already_registered_list.append({
+                            'waybill_id': wb.id,
+                            'lastmile_no': wb.lastmile_no,
+                            'tracking': tracking
+                        })
+                    else:
+                        to_register_list.append({
+                            'waybill_id': wb.id,
+                            'lastmile_no': wb.lastmile_no
+                        })
+            
+            success_count = 0
+            error_details = []
+            now = datetime.utcnow()
+            
+            # 处理已注册的单号
+            if already_registered_list:
+                logger.info(f"[异步尾程轨迹] 处理已注册单号 {len(already_registered_list)}单")
+                
+                registered_numbers = [item['lastmile_no'] for item in already_registered_list]
+                
+                try:
+                    fetch_result = fetch_lastmile_tracking(registered_numbers)
+                    
+                    if fetch_result.get('success'):
+                        for item in already_registered_list:
+                            tracking = item['tracking']
+                            tracking.lastmile_tracking_response = fetch_result.get('raw_response', '')
+                            tracking.lastmile_last_fetch_time = now
+                            
+                            # 合并到推送报文
+                            try:
+                                existing_push_events = json.loads(tracking.push_events) if tracking.push_events else []
+                                merged_events = merge_lastmile_push_events(tracking, existing_push_events)
+                                tracking.push_events = json.dumps(merged_events, ensure_ascii=False)
+                            except Exception as e:
+                                logger.error(f"合并尾程推送报文失败: {str(e)}")
+                            
+                            success_count += 1
+                    else:
+                        error_details.append(f"已注册单号查询失败: {fetch_result.get('message')}")
+                except Exception as e:
+                    error_details.append(f"已注册单号查询异常: {str(e)}")
+            
+            # 处理未注册的单号
+            if to_register_list:
+                logger.info(f"[异步尾程轨迹] 处理未注册单号 {len(to_register_list)}单")
+                
+                try:
+                    results = batch_fetch_lastmile_tracking(to_register_list)
+                    
+                    for result in results:
+                        if result.get('success'):
+                            waybill_id = result.get('waybill_id')
+                            tracking = TrackingInfo.query.filter_by(waybill_id=waybill_id).first()
+                            if tracking:
+                                tracking.lastmile_register_response = result.get('register_response', '')
+                                tracking.lastmile_tracking_response = result.get('tracking_response', '')
+                                tracking.lastmile_last_fetch_time = now
+                                
+                                # 合并到推送报文
+                                try:
+                                    existing_push_events = json.loads(tracking.push_events) if tracking.push_events else []
+                                    merged_events = merge_lastmile_push_events(tracking, existing_push_events)
+                                    tracking.push_events = json.dumps(merged_events, ensure_ascii=False)
+                                except Exception as e:
+                                    logger.error(f"合并尾程推送报文失败: {str(e)}")
+                                
+                                success_count += 1
+                        else:
+                            error_details.append(f"运单ID {result.get('waybill_id')}: {result.get('message')}")
+                except Exception as e:
+                    error_details.append(f"未注册单号处理异常: {str(e)}")
+            
+            db.session.commit()
+            
+            # 更新任务状态
+            if task_record:
+                task_record.status = 'SUCCESS'
+                task_record.result_msg = f"成功: {success_count}单, 失败: {len(error_details)}单"
+                db.session.commit()
+            
+            logger.info(f"[异步尾程轨迹] 任务完成，成功: {success_count}, 失败: {len(error_details)}")
+            
+            return {
+                "success": True,
+                "total_success": success_count,
+                "total_failed": len(error_details),
+                "error_details": error_details,
+                "message": f"成功获取 {success_count} 条尾程轨迹数据"
+            }
+            
+        except Exception as e:
+            logger.error(f"[异步尾程轨迹] 任务异常: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            if task_record:
+                task_record.status = 'FAILURE'
+                task_record.result_msg = str(e)
+                db.session.commit()
+            
+            raise
+
+
+@celery.task(name='app.auto_fetch_tracking_task')
+def auto_fetch_tracking_task():
+    """
+    自动获取头程轨迹定时任务（同时获取尾程轨迹）
+    每小时执行一次，检查需要获取轨迹的运单
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("========== 开始执行自动获取轨迹任务 ==========")
+    
+    with app.app_context():
+        try:
+            from tracking_handler.tracking_handler_manager import batch_fetch_tracking_by_interface
+            from tracking_handler.tracking_lastmile_handler import batch_fetch_lastmile_tracking, fetch_lastmile_tracking
+            import json
+            from datetime import datetime, timedelta
+            from decimal import Decimal
+            
+            now = datetime.utcnow()
+            
+            # 查询所有轨迹接口
+            interfaces = TrackingInterface.query.all()
+            
+            total_fetched = 0
+            total_skipped = 0
+            total_failed = 0
+            
+            # 尾程轨迹统计
+            total_lastmile_fetched = 0
+            total_lastmile_failed = 0
+            
+            for interface in interfaces:
+                logger.info(f"处理接口: {interface.interface_name}")
+                
+                # 计算时间阈值：现在 - fetch_interval
+                fetch_interval_hours = float(interface.fetch_interval)
+                threshold_time = now - timedelta(hours=fetch_interval_hours)
+                
+                # 查询需要获取轨迹的运单
+                # 条件：
+                # 1. 产品绑定了该接口
+                # 2. 未停止跟踪（stop_tracking=False）
+                # 3. last_fetch_time < threshold_time 或者 last_fetch_time 为 NULL
+                query = db.session.query(
+                    TrackingInfo.id,
+                    TrackingInfo.waybill_id,
+                    TrackingInfo.order_no,
+                    TrackingInfo.transfer_no,
+                    TrackingInfo.last_fetch_time,
+                    TrackingInfo.lastmile_no,
+                    TrackingInfo.lastmile_register_response
+                ).filter(
+                    TrackingInfo.tracking_interface_id == interface.id,
+                    db.or_(
+                        TrackingInfo.stop_tracking == False,
+                        TrackingInfo.stop_tracking.is_(None)
+                    ),
+                    db.or_(
+                        TrackingInfo.last_fetch_time < threshold_time,
+                        TrackingInfo.last_fetch_time.is_(None)
+                    )
+                )
+                
+                trackings = query.all()
+                
+                if not trackings:
+                    logger.info(f"  接口 {interface.interface_name} 暂无需要获取的运单")
+                    continue
+                
+                logger.info(f"  找到 {len(trackings)} 个需要获取轨迹的运单")
+                
+                # 构造运单列表
+                waybill_list = []
+                for tracking in trackings:
+                    waybill_list.append({
+                        'waybill_id': tracking.waybill_id,
+                        'order_no': tracking.order_no,
+                        'transfer_no': tracking.transfer_no
+                    })
+                
+                # 准备接口配置
+                interface_config = {
+                    'interface_name': interface.interface_name,
+                    'request_url': interface.request_url,
+                    'auth_params': interface.auth_params
+                }
+                
+                status_mapping = json.loads(interface.status_mapping) if interface.status_mapping else []
+                response_key_params = json.loads(interface.response_key_params) if interface.response_key_params else None
+                
+                # 批量获取头程轨迹
+                results = batch_fetch_tracking_by_interface(
+                    waybill_list,
+                    interface_config,
+                    status_mapping,
+                    response_key_params
+                )
+                
+                # 收集有尾程单号的运单
+                lastmile_registered_list = []  # 已注册的尾程单号
+                lastmile_to_register_list = []  # 未注册的尾程单号
+                
+                # 处理头程轨迹结果
+                for result in results:
+                    if not result.get('success'):
+                        total_failed += 1
+                        logger.warning(f"    运单 {result.get('order_no')} 获取失败: {result.get('message')}")
+                        continue
+                    
+                    waybill_id = result['waybill_id']
+                    
+                    # 查询运单和轨迹信息
+                    waybill = Waybill.query.get(waybill_id)
+                    tracking = TrackingInfo.query.filter_by(waybill_id=waybill_id).first()
+                    
+                    if not waybill or not tracking:
+                        total_failed += 1
+                        continue
+                    
+                    # 更新头程轨迹信息
+                    tracking.tracking_description = result.get('tracking_description', '')
+                    tracking.status_code = result.get('status_code', '')
+                    tracking.tracking_time = result.get('tracking_time')
+                    tracking.raw_response = result.get('raw_response', '')
+                    tracking.last_fetch_time = now
+                    
+                    # 从头程报文中提取尾程单号
+                    try:
+                        raw_data = json.loads(result.get('raw_response', '{}'))
+                        if "tracks" in raw_data and raw_data["tracks"]:
+                            lastmile_no = raw_data["tracks"][0].get("transferNo", "")
+                            if lastmile_no:
+                                tracking.lastmile_no = lastmile_no
+                                
+                                # 判断是否需要获取尾程轨迹
+                                if tracking.lastmile_register_response:
+                                    # 已注册，直接查询
+                                    lastmile_registered_list.append({
+                                        'lastmile_no': lastmile_no,
+                                        'tracking': tracking
+                                    })
+                                else:
+                                    # 未注册，需要注册
+                                    lastmile_to_register_list.append({
+                                        'waybill_id': waybill_id,
+                                        'lastmile_no': lastmile_no
+                                    })
+                    except:
+                        pass
+                    
+                    # 检查是否应该停止跟踪
+                    should_stop, reason = should_stop_tracking(waybill, tracking)
+                    if should_stop:
+                        tracking.stop_tracking = True
+                        tracking.stop_tracking_reason = reason
+                        tracking.stop_tracking_time = now
+                        logger.info(f"    运单 {tracking.order_no} 满足停止条件: {reason}")
+                    
+                    total_fetched += 1
+            
+                # 批量获取尾程轨迹（已注册的单号）
+                if lastmile_registered_list:
+                    logger.info(f"  开始获取已注册尾程单号 {len(lastmile_registered_list)} 个")
+                    registered_numbers = [item['lastmile_no'] for item in lastmile_registered_list]
+                    
+                    try:
+                        fetch_result = fetch_lastmile_tracking(registered_numbers)
+                        if fetch_result.get('success'):
+                            for item in lastmile_registered_list:
+                                tracking = item['tracking']
+                                tracking.lastmile_tracking_response = fetch_result.get('raw_response', '')
+                                tracking.lastmile_last_fetch_time = now
+                                total_lastmile_fetched += 1
+                        else:
+                            total_lastmile_failed += len(lastmile_registered_list)
+                            logger.warning(f"  已注册尾程单号查询失败: {fetch_result.get('message')}")
+                    except Exception as e:
+                        total_lastmile_failed += len(lastmile_registered_list)
+                        logger.error(f"  已注册尾程单号查询异常: {str(e)}")
+                
+                # 批量获取尾程轨迹（未注册的单号）
+                if lastmile_to_register_list:
+                    logger.info(f"  开始注册并获取尾程单号 {len(lastmile_to_register_list)} 个")
+                    
+                    try:
+                        lastmile_results = batch_fetch_lastmile_tracking(lastmile_to_register_list)
+                        for result in lastmile_results:
+                            if result.get('success'):
+                                waybill_id = result.get('waybill_id')
+                                tracking = TrackingInfo.query.filter_by(waybill_id=waybill_id).first()
+                                if tracking:
+                                    tracking.lastmile_register_response = result.get('register_response', '')
+                                    tracking.lastmile_tracking_response = result.get('tracking_response', '')
+                                    tracking.lastmile_last_fetch_time = now
+                                    total_lastmile_fetched += 1
+                            else:
+                                total_lastmile_failed += 1
+                                logger.warning(f"  运单 {result.get('waybill_id')} 尾程轨迹获取失败: {result.get('message')}")
+                    except Exception as e:
+                        total_lastmile_failed += len(lastmile_to_register_list)
+                        logger.error(f"  未注册尾程单号处理异常: {str(e)}")
+            
+            # 提交所有更新
+            db.session.commit()
+            
+            logger.info(f"========== 任务执行完成 ==========")
+            logger.info(f"头程轨迹 - 成功: {total_fetched} 条, 失败: {total_failed} 条")
+            logger.info(f"尾程轨迹 - 成功: {total_lastmile_fetched} 条, 失败: {total_lastmile_failed} 条")
+            
+            return {
+                "success": True,
+                "fetched": total_fetched,
+                "failed": total_failed,
+                "lastmile_fetched": total_lastmile_fetched,
+                "lastmile_failed": total_lastmile_failed,
+                "message": f"头程成功 {total_fetched} 条，尾程成功 {total_lastmile_fetched} 条"
+            }
+            
+        except Exception as e:
+            logger.error(f"========== 任务执行失败: {str(e)} ==========")
+            logger.exception("详细错误:")
+            db.session.rollback()
+            return {
+                "success": False,
+                "message": f"执行失败: {str(e)}"
+            }
+
+
+@celery.task(name='app.auto_fetch_lastmile_tracking_task')
+def auto_fetch_lastmile_tracking_task():
+    """
+    尾程轨迹自动获取任务（已在 auto_fetch_tracking_task 中实现）
+    此函数保留以兼容历史配置，实际不会被调用
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("尾程轨迹自动获取已合并到头程轨迹任务中，无需单独执行")
+    return {
+        "success": True,
+        "message": "尾程轨迹获取已集成在头程轨迹任务中"
+    }
 
 
 @app.route('/pictures/<path:filename>')
@@ -1223,6 +2246,8 @@ def api_get_products():
             "name": product.name,
             "description": product.description or "",
             "fee_types": product.fee_types.split(",") if product.fee_types else [],
+            "supplier_id": product.supplier_id,
+            "supplier_name": product.supplier.short_name if product.supplier else "",
             "created_at": product.created_at.isoformat() if product.created_at else None,
         })
 
@@ -1247,6 +2272,8 @@ def api_create_product():
     name = (data.get("name") or "").strip()
     description = (data.get("description") or "").strip()
     fee_types = data.get("fee_types") or []
+    supplier_id = data.get("supplier_id")
+    tracking_interface_id = data.get("tracking_interface_id")
 
     if not name:
         return jsonify({"success": False, "message": "产品名称不能为空", "field": "name"}), 400
@@ -1257,11 +2284,37 @@ def api_create_product():
     # 验证描述长度
     if description and len(description) > 100:
         return jsonify({"success": False, "message": "产品描述最多100字", "field": "description"}), 400
+    
+    # 如果包含差价收费，必须选择供应商
+    if "差价收费" in fee_types:
+        if not supplier_id:
+            return jsonify({"success": False, "message": "包含差价收费的产品必须选择供应商", "field": "supplier_id"}), 400
+        # 验证供应商是否存在
+        supplier = Supplier.query.get(supplier_id)
+        if not supplier:
+            return jsonify({"success": False, "message": "供应商不存在", "field": "supplier_id"}), 400
+    else:
+        supplier_id = None  # 不包含差价收费时，不绑定供应商
+    
+    # 如果包含尾程收费，可以选择轨迹接口（非必选）
+    if "尾程收费" in fee_types and tracking_interface_id:
+        # 验证轨迹接口是否存在
+        interface = TrackingInterface.query.get(tracking_interface_id)
+        if not interface:
+            return jsonify({"success": False, "message": "轨迹接口不存在", "field": "tracking_interface_id"}), 400
+    elif "尾程收费" not in fee_types:
+        tracking_interface_id = None  # 不包含尾程收费时，不绑定轨迹接口
 
     # 将数组转为逗号分隔的字符串
     fee_types_str = ",".join(fee_types)
 
-    product = Product(name=name, description=description, fee_types=fee_types_str)
+    product = Product(
+        name=name, 
+        description=description, 
+        fee_types=fee_types_str, 
+        supplier_id=supplier_id,
+        tracking_interface_id=tracking_interface_id
+    )
     db.session.add(product)
     db.session.commit()
 
@@ -1286,6 +2339,8 @@ def api_update_product(product_id):
     name = (data.get("name") or "").strip()
     description = (data.get("description") or "").strip()
     fee_types = data.get("fee_types") or []
+    supplier_id = data.get("supplier_id")
+    tracking_interface_id = data.get("tracking_interface_id")
 
     if not name:
         return jsonify({"success": False, "message": "产品名称不能为空", "field": "name"}), 400
@@ -1296,10 +2351,32 @@ def api_update_product(product_id):
     # 验证描述长度
     if description and len(description) > 100:
         return jsonify({"success": False, "message": "产品描述最多100字", "field": "description"}), 400
+    
+    # 如果包含差价收费，必须选择供应商
+    if "差价收费" in fee_types:
+        if not supplier_id:
+            return jsonify({"success": False, "message": "包含差价收费的产品必须选择供应商", "field": "supplier_id"}), 400
+        # 验证供应商是否存在
+        supplier = Supplier.query.get(supplier_id)
+        if not supplier:
+            return jsonify({"success": False, "message": "供应商不存在", "field": "supplier_id"}), 400
+    else:
+        supplier_id = None  # 不包含差价收费时，不绑定供应商
+    
+    # 如果包含尾程收费，可以选择轨迹接口（非必选）
+    if "尾程收费" in fee_types and tracking_interface_id:
+        # 验证轨迹接口是否存在
+        interface = TrackingInterface.query.get(tracking_interface_id)
+        if not interface:
+            return jsonify({"success": False, "message": "轨迹接口不存在", "field": "tracking_interface_id"}), 400
+    elif "尾程收费" not in fee_types:
+        tracking_interface_id = None  # 不包含尾程收费时，不绑定轨迹接口
 
     product.name = name
     product.description = description
     product.fee_types = ",".join(fee_types)
+    product.supplier_id = supplier_id
+    product.tracking_interface_id = tracking_interface_id
     db.session.commit()
 
     return jsonify({"success": True})
@@ -1325,8 +2402,1387 @@ def api_delete_product(product_id):
     return jsonify({"success": True})
 
 
-# ==================== 客户管理 API ====================
+# ==================== 轨迹节点状态管理 API ====================
 
+@app.get("/api/tracking-nodes")
+def api_get_tracking_nodes():
+    """获取轨迹节点状态列表"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    page = request.args.get("page", type=int, default=1)
+    per_page = request.args.get("per_page", type=int, default=20)
+
+    pagination = TrackingNode.query.order_by(TrackingNode.id.desc()).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+    
+    nodes_data = []
+    for node in pagination.items:
+        nodes_data.append({
+            "id": node.id,
+            "status_code": node.status_code,
+            "status_description": node.status_description,
+            "default_city": node.default_city or "",
+            "default_country_code": node.default_country_code or "",
+            "default_airport_code": node.default_airport_code or "",
+            "created_at": node.created_at.isoformat() if node.created_at else None,
+        })
+
+    return jsonify({
+        "success": True,
+        "nodes": nodes_data,
+        "pagination": {
+            "total": pagination.total,
+            "pages": pagination.pages,
+            "current_page": pagination.page,
+            "per_page": pagination.per_page
+        }
+    })
+
+
+@app.post("/api/tracking-nodes")
+def api_create_tracking_node():
+    """创建轨迹节点状态"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限创建轨迹节点状态"}), 403
+
+    data = request.get_json() or {}
+    status_code = (data.get("status_code") or "").strip()
+    status_description = (data.get("status_description") or "").strip()
+    default_city = (data.get("default_city") or "").strip()
+    default_country_code = (data.get("default_country_code") or "").strip()
+    default_airport_code = (data.get("default_airport_code") or "").strip()
+
+    if not status_code:
+        return jsonify({"success": False, "message": "状态代码不能为空", "field": "status_code"}), 400
+
+    if not status_description:
+        return jsonify({"success": False, "message": "状态说明不能为空", "field": "status_description"}), 400
+
+    # 检查状态代码是否已存在
+    existing = TrackingNode.query.filter_by(status_code=status_code).first()
+    if existing:
+        return jsonify({"success": False, "message": f"状态代码'{status_code}'已存在", "field": "status_code"}), 400
+
+    node = TrackingNode(
+        status_code=status_code,
+        status_description=status_description,
+        default_city=default_city if default_city else None,
+        default_country_code=default_country_code if default_country_code else None,
+        default_airport_code=default_airport_code if default_airport_code else None
+    )
+    db.session.add(node)
+    db.session.commit()
+
+    return jsonify({"success": True, "id": node.id})
+
+
+@app.put("/api/tracking-nodes/<int:node_id>")
+def api_update_tracking_node(node_id):
+    """更新轨迹节点状态"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限编辑轨迹节点状态"}), 403
+
+    node = TrackingNode.query.get(node_id)
+    if not node:
+        return jsonify({"success": False, "message": "轨迹节点状态不存在"}), 404
+
+    data = request.get_json() or {}
+    status_code = (data.get("status_code") or "").strip()
+    status_description = (data.get("status_description") or "").strip()
+    default_city = (data.get("default_city") or "").strip()
+    default_country_code = (data.get("default_country_code") or "").strip()
+    default_airport_code = (data.get("default_airport_code") or "").strip()
+
+    if not status_code:
+        return jsonify({"success": False, "message": "状态代码不能为空", "field": "status_code"}), 400
+
+    if not status_description:
+        return jsonify({"success": False, "message": "状态说明不能为空", "field": "status_description"}), 400
+
+    # 检查状态代码是否与其他记录冲突
+    existing = TrackingNode.query.filter(TrackingNode.status_code == status_code, TrackingNode.id != node_id).first()
+    if existing:
+        return jsonify({"success": False, "message": f"状态代码'{status_code}'已存在", "field": "status_code"}), 400
+
+    node.status_code = status_code
+    node.status_description = status_description
+    node.default_city = default_city if default_city else None
+    node.default_country_code = default_country_code if default_country_code else None
+    node.default_airport_code = default_airport_code if default_airport_code else None
+    db.session.commit()
+
+    return jsonify({"success": True})
+
+
+@app.delete("/api/tracking-nodes/<int:node_id>")
+def api_delete_tracking_node(node_id):
+    """删除轨迹节点状态"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限删除轨迹节点状态"}), 403
+
+    node = TrackingNode.query.get(node_id)
+    if not node:
+        return jsonify({"success": False, "message": "轨迹节点状态不存在"}), 404
+
+    db.session.delete(node)
+    db.session.commit()
+
+    return jsonify({"success": True})
+
+
+# ==================== 轨迹接口管理 API ====================
+
+@app.get("/api/tracking-interfaces")
+def api_get_tracking_interfaces():
+    """获取轨迹接口列表"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    page = request.args.get("page", type=int)
+    per_page = request.args.get("per_page", type=int, default=20)
+
+    query = TrackingInterface.query.order_by(TrackingInterface.id.desc())
+    
+    if page:
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        interfaces = pagination.items
+        pagination_data = {
+            "total": pagination.total,
+            "pages": pagination.pages,
+            "current_page": pagination.page,
+            "per_page": pagination.per_page
+        }
+    else:
+        interfaces = query.all()
+        pagination_data = None
+    
+    interfaces_data = []
+    for interface in interfaces:
+        interfaces_data.append({
+            "id": interface.id,
+            "interface_name": interface.interface_name,
+            "request_url": interface.request_url,
+            "auth_params": interface.auth_params or "",
+            "status_mapping": interface.status_mapping or "",
+            "response_key_params": interface.response_key_params or "",
+            "fetch_interval": float(interface.fetch_interval) if interface.fetch_interval else 0,
+            "created_at": interface.created_at.isoformat() if interface.created_at else None,
+        })
+
+    return jsonify({
+        "success": True,
+        "interfaces": interfaces_data,
+        "pagination": pagination_data
+    })
+
+
+@app.post("/api/tracking-interfaces")
+def api_create_tracking_interface():
+    """创建轨迹接口"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限创建轨迹接口"}), 403
+
+    data = request.get_json() or {}
+    interface_name = (data.get("interface_name") or "").strip()
+    request_url = (data.get("request_url") or "").strip()
+    auth_params = data.get("auth_params") or ""
+    status_mapping = data.get("status_mapping") or ""
+    response_key_params = data.get("response_key_params") or ""
+    fetch_interval = data.get("fetch_interval")
+
+    if not interface_name:
+        return jsonify({"success": False, "message": "轨迹接口名称不能为空", "field": "interface_name"}), 400
+
+    if not request_url:
+        return jsonify({"success": False, "message": "轨迹请求地址不能为空", "field": "request_url"}), 400
+
+    if not fetch_interval:
+        return jsonify({"success": False, "message": "获取频率不能为空", "field": "fetch_interval"}), 400
+
+    try:
+        fetch_interval = float(fetch_interval)
+        if fetch_interval <= 0:
+            return jsonify({"success": False, "message": "获取频率必须大于0", "field": "fetch_interval"}), 400
+    except:
+        return jsonify({"success": False, "message": "获取频率格式错误", "field": "fetch_interval"}), 400
+
+    # 检查接口名称是否已存在
+    existing = TrackingInterface.query.filter_by(interface_name=interface_name).first()
+    if existing:
+        return jsonify({"success": False, "message": f"轨迹接口名称'{interface_name}'已存在", "field": "interface_name"}), 400
+
+    # 验证JSON格式
+    if auth_params:
+        try:
+            json.loads(auth_params)
+        except:
+            return jsonify({"success": False, "message": "验证信息JSON格式错误", "field": "auth_params"}), 400
+
+    if status_mapping:
+        try:
+            json.loads(status_mapping)
+        except:
+            return jsonify({"success": False, "message": "状态映射表JSON格式错误", "field": "status_mapping"}), 400
+    
+    if response_key_params:
+        try:
+            json.loads(response_key_params)
+        except:
+            return jsonify({"success": False, "message": "关键参数JSON格式错误", "field": "response_key_params"}), 400
+
+    interface = TrackingInterface(
+        interface_name=interface_name,
+        request_url=request_url,
+        auth_params=auth_params,
+        status_mapping=status_mapping,
+        response_key_params=response_key_params,
+        fetch_interval=fetch_interval
+    )
+    db.session.add(interface)
+    db.session.commit()
+
+    return jsonify({"success": True, "id": interface.id})
+
+
+@app.put("/api/tracking-interfaces/<int:interface_id>")
+def api_update_tracking_interface(interface_id):
+    """更新轨迹接口"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限编辑轨迹接口"}), 403
+
+    interface = TrackingInterface.query.get(interface_id)
+    if not interface:
+        return jsonify({"success": False, "message": "轨迹接口不存在"}), 404
+
+    data = request.get_json() or {}
+    interface_name = (data.get("interface_name") or "").strip()
+    request_url = (data.get("request_url") or "").strip()
+    auth_params = data.get("auth_params") or ""
+    status_mapping = data.get("status_mapping") or ""
+    response_key_params = data.get("response_key_params") or ""
+    fetch_interval = data.get("fetch_interval")
+
+    if not interface_name:
+        return jsonify({"success": False, "message": "轨迹接口名称不能为空", "field": "interface_name"}), 400
+
+    if not request_url:
+        return jsonify({"success": False, "message": "轨迹请求地址不能为空", "field": "request_url"}), 400
+
+    if not fetch_interval:
+        return jsonify({"success": False, "message": "获取频率不能为空", "field": "fetch_interval"}), 400
+
+    try:
+        fetch_interval = float(fetch_interval)
+        if fetch_interval <= 0:
+            return jsonify({"success": False, "message": "获取频率必须大于0", "field": "fetch_interval"}), 400
+    except:
+        return jsonify({"success": False, "message": "获取频率格式错误", "field": "fetch_interval"}), 400
+
+    # 检查接口名称是否与其他记录冲突
+    existing = TrackingInterface.query.filter(TrackingInterface.interface_name == interface_name, TrackingInterface.id != interface_id).first()
+    if existing:
+        return jsonify({"success": False, "message": f"轨迹接口名称'{interface_name}'已存在", "field": "interface_name"}), 400
+
+    # 验证JSON格式
+    if auth_params:
+        try:
+            json.loads(auth_params)
+        except:
+            return jsonify({"success": False, "message": "验证信息JSON格式错误", "field": "auth_params"}), 400
+
+    if status_mapping:
+        try:
+            json.loads(status_mapping)
+        except:
+            return jsonify({"success": False, "message": "状态映射表JSON格式错误", "field": "status_mapping"}), 400
+    
+    if response_key_params:
+        try:
+            json.loads(response_key_params)
+        except:
+            return jsonify({"success": False, "message": "关键参数JSON格式错误", "field": "response_key_params"}), 400
+
+    interface.interface_name = interface_name
+    interface.request_url = request_url
+    interface.auth_params = auth_params
+    interface.status_mapping = status_mapping
+    interface.response_key_params = response_key_params
+    interface.fetch_interval = fetch_interval
+    db.session.commit()
+
+    return jsonify({"success": True})
+
+
+@app.delete("/api/tracking-interfaces/<int:interface_id>")
+def api_delete_tracking_interface(interface_id):
+    """删除轨迹接口"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限删除轨迹接口"}), 403
+
+    interface = TrackingInterface.query.get(interface_id)
+    if not interface:
+        return jsonify({"success": False, "message": "轨迹接口不存在"}), 404
+
+    db.session.delete(interface)
+    db.session.commit()
+
+    return jsonify({"success": True})
+
+
+# ==================== 尾程轨迹状态映射表 API ====================
+
+@app.get("/api/lastmile-status-mappings")
+def api_get_lastmile_status_mappings():
+    """获取尾程轨迹状态映射表列表"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    page = request.args.get("page", type=int)
+    per_page = request.args.get("per_page", type=int, default=50)
+
+    query = LastmileStatusMapping.query.order_by(LastmileStatusMapping.id.desc())
+    
+    if page:
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        mappings = pagination.items
+        pagination_data = {
+            "total": pagination.total,
+            "pages": pagination.pages,
+            "current_page": pagination.page,
+            "per_page": pagination.per_page
+        }
+    else:
+        mappings = query.all()
+        pagination_data = None
+    
+    mappings_data = []
+    for mapping in mappings:
+        mappings_data.append({
+            "id": mapping.id,
+            "description": mapping.description,
+            "sub_status": mapping.sub_status,
+            "system_status_code": mapping.system_status_code,
+            "created_at": mapping.created_at.isoformat() if mapping.created_at else None,
+        })
+
+    return jsonify({
+        "success": True,
+        "mappings": mappings_data,
+        "pagination": pagination_data
+    })
+
+
+@app.post("/api/lastmile-status-mappings")
+def api_create_lastmile_status_mapping():
+    """创建尾程轨迹状态映射"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限创建尾程映射"}), 403
+
+    data = request.get_json() or {}
+    description = (data.get("description") or "").strip()  # description 为非必填，允许为空
+    sub_status = (data.get("sub_status") or "").strip()
+    system_status_code = (data.get("system_status_code") or "").strip()
+
+    # description 为非必填，不需要验证
+
+    if not sub_status:
+        return jsonify({"success": False, "message": "尾程轨迹状态不能为空", "field": "sub_status"}), 400
+
+    if not system_status_code:
+        return jsonify({"success": False, "message": "系统状态不能为空", "field": "system_status_code"}), 400
+
+    # 检查系统状态代码是否存在
+    node = TrackingNode.query.filter_by(status_code=system_status_code).first()
+    if not node:
+        return jsonify({"success": False, "message": f"系统状态代码'{system_status_code}'不存在", "field": "system_status_code"}), 400
+
+    # 检查是否已存在相同的映射（description 可为空，所以需要同时比较 description 和 sub_status）
+    if description:  # 如果 description 有值，检查 description + sub_status 组合
+        existing = LastmileStatusMapping.query.filter_by(description=description, sub_status=sub_status).first()
+        if existing:
+            return jsonify({"success": False, "message": f"相同的映射已存在（description='{description}', sub_status='{sub_status}'）"}), 400
+    else:  # 如果 description 为空，检查 sub_status 是否已存在（description 也为空的情况）
+        existing = LastmileStatusMapping.query.filter(
+            LastmileStatusMapping.sub_status == sub_status,
+            db.or_(LastmileStatusMapping.description == '', LastmileStatusMapping.description.is_(None))
+        ).first()
+        if existing:
+            return jsonify({"success": False, "message": f"相同的映射已存在（sub_status='{sub_status}'，且 description 为空）"}), 400
+
+    mapping = LastmileStatusMapping(
+        description=description,
+        sub_status=sub_status,
+        system_status_code=system_status_code
+    )
+    db.session.add(mapping)
+    db.session.commit()
+
+    return jsonify({"success": True, "id": mapping.id})
+
+
+@app.put("/api/lastmile-status-mappings/<int:mapping_id>")
+def api_update_lastmile_status_mapping(mapping_id):
+    """更新尾程轨迹状态映射"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限编辑尾程映射"}), 403
+
+    mapping = LastmileStatusMapping.query.get(mapping_id)
+    if not mapping:
+        return jsonify({"success": False, "message": "映射不存在"}), 404
+
+    data = request.get_json() or {}
+    description = (data.get("description") or "").strip()  # description 为非必填，允许为空
+    sub_status = (data.get("sub_status") or "").strip()
+    system_status_code = (data.get("system_status_code") or "").strip()
+
+    # description 为非必填，不需要验证
+
+    if not sub_status:
+        return jsonify({"success": False, "message": "尾程轨迹状态不能为空", "field": "sub_status"}), 400
+
+    if not system_status_code:
+        return jsonify({"success": False, "message": "系统状态不能为空", "field": "system_status_code"}), 400
+
+    # 检查系统状态代码是否存在
+    node = TrackingNode.query.filter_by(status_code=system_status_code).first()
+    if not node:
+        return jsonify({"success": False, "message": f"系统状态代码'{system_status_code}'不存在", "field": "system_status_code"}), 400
+
+    # 检查是否与其他记录冲突
+    if description:  # 如果 description 有值，检查 description + sub_status 组合
+        existing = LastmileStatusMapping.query.filter(
+            LastmileStatusMapping.description == description,
+            LastmileStatusMapping.sub_status == sub_status,
+            LastmileStatusMapping.id != mapping_id
+        ).first()
+        if existing:
+            return jsonify({"success": False, "message": f"相同的映射已存在（description='{description}', sub_status='{sub_status}'）"}), 400
+    else:  # 如果 description 为空，检查 sub_status 是否已存在（description 也为空的情况）
+        existing = LastmileStatusMapping.query.filter(
+            LastmileStatusMapping.sub_status == sub_status,
+            db.or_(LastmileStatusMapping.description == '', LastmileStatusMapping.description.is_(None)),
+            LastmileStatusMapping.id != mapping_id
+        ).first()
+        if existing:
+            return jsonify({"success": False, "message": f"相同的映射已存在（sub_status='{sub_status}'，且 description 为空）"}), 400
+
+    mapping.description = description
+    mapping.sub_status = sub_status
+    mapping.system_status_code = system_status_code
+    db.session.commit()
+
+    return jsonify({"success": True})
+
+
+@app.delete("/api/lastmile-status-mappings/<int:mapping_id>")
+def api_delete_lastmile_status_mapping(mapping_id):
+    """删除尾程轨迹状态映射"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限删除尾程映射"}), 403
+
+    mapping = LastmileStatusMapping.query.get(mapping_id)
+    if not mapping:
+        return jsonify({"success": False, "message": "映射不存在"}), 404
+
+    db.session.delete(mapping)
+    db.session.commit()
+
+    return jsonify({"success": True})
+
+
+# ==================== 轨迹数据管理 API ====================
+
+@app.get("/api/tracking-data")
+def api_get_tracking_data():
+    """获取轨迹数据列表（只显示有轨迹接口绑定的运单）"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    page = request.args.get("page", type=int, default=1)
+    per_page = request.args.get("per_page", type=int, default=200)
+    
+    # 搜索条件
+    interface_name = request.args.get("interface_name", type=str, default="")
+    stop_tracking = request.args.get("stop_tracking", type=str, default="")  # "true" 或 "false"
+    order_nos = request.args.get("order_nos", type=str, default="")  # 订单号搜索（多个，逗号分隔）
+    transfer_nos = request.args.get("transfer_nos", type=str, default="")  # 转单号搜索（多个，逗号分隔）
+    start_date = request.args.get("start_date", type=str, default="")  # 开始日期
+    end_date = request.args.get("end_date", type=str, default="")  # 结束日期
+
+    # 查询有轨迹接口绑定的运单
+    query = db.session.query(
+        Waybill.id,
+        Waybill.order_no,
+        Waybill.transfer_no,
+        Waybill.order_time,
+        TrackingInfo.status_code,
+        TrackingInfo.last_fetch_time,
+        TrackingInfo.last_push_time,
+        TrackingInfo.raw_response,
+        TrackingInfo.lastmile_no,
+        TrackingInfo.lastmile_register_response,
+        TrackingInfo.lastmile_tracking_response,
+        TrackingInfo.push_events,
+        TrackingInfo.szpost_response,
+        TrackingInfo.stop_tracking,
+        TrackingInfo.id.label('tracking_id'),
+        TrackingInterface.interface_name
+    ).join(
+        Product, Waybill.product_id == Product.id
+    ).outerjoin(
+        TrackingInfo, Waybill.id == TrackingInfo.waybill_id
+    ).outerjoin(
+        TrackingInterface, Product.tracking_interface_id == TrackingInterface.id
+    ).filter(
+        Product.tracking_interface_id.isnot(None)
+    )
+    
+    # 按接口名称筛选
+    if interface_name:
+        query = query.filter(TrackingInterface.interface_name == interface_name)
+    
+    # 按订单号筛选（支持多个，换行或逗号分隔）
+    if order_nos:
+        # 将换行符或逗号分隔的订单号分割为列表
+        order_list = [o.strip() for o in order_nos.replace('\n', ',').replace('\r', '').split(',') if o.strip()]
+        if order_list:
+            query = query.filter(Waybill.order_no.in_(order_list))
+    
+    # 按转单号筛选（支持多个，换行或逗号分隔）
+    if transfer_nos:
+        # 将换行符或逗号分隔的转单号分割为列表
+        transfer_list = [t.strip() for t in transfer_nos.replace('\n', ',').replace('\r', '').split(',') if t.strip()]
+        if transfer_list:
+            query = query.filter(Waybill.transfer_no.in_(transfer_list))
+    
+    # 按下单日期筛选
+    if start_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            query = query.filter(Waybill.order_time >= start_dt)
+        except:
+            pass
+    
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+            query = query.filter(Waybill.order_time < end_dt)
+        except:
+            pass
+    
+    # 按停止跟踪状态筛选
+    if stop_tracking == "true":
+        query = query.filter(TrackingInfo.stop_tracking == True)
+    elif stop_tracking == "false":
+        query = query.filter(db.or_(
+            TrackingInfo.stop_tracking == False,
+            TrackingInfo.stop_tracking.is_(None)
+        ))
+    
+    query = query.order_by(Waybill.order_time.desc())
+
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+
+    tracking_data = []
+    for row in pagination.items:
+        has_raw_response = bool(row.raw_response)
+        # 检查是否有尾程报文（注册或查询任意一个有值即可）
+        has_lastmile_response = bool(row.lastmile_register_response or row.lastmile_tracking_response)
+        
+        # 优先使用数据库存储的尾程单号，如果没有则从原始报文解析
+        last_mile_no = row.lastmile_no or ""
+        if not last_mile_no and row.raw_response:
+            try:
+                raw_data = json.loads(row.raw_response)
+                # 从通邮接口报文中提取transferNo
+                if "tracks" in raw_data and raw_data["tracks"]:
+                    last_mile_no = raw_data["tracks"][0].get("transferNo", "")
+            except:
+                pass
+        
+        # 获取状态码对应的中文描述（比较头程和尾程，取最新的）
+        status_description = ""
+        final_status_code = ""
+        final_tracking_time = None
+        
+        # 头程时间和状态码
+        headhaul_time = None
+        headhaul_status_code = row.status_code or ""
+        if row.raw_response:
+            try:
+                raw_data = json.loads(row.raw_response)
+                if "tracks" in raw_data and raw_data["tracks"]:
+                    track_info_list = raw_data["tracks"][0].get("trackInfo", [])
+                    if track_info_list:
+                        # 按时间排序取最新
+                        track_info_list.sort(key=lambda x: x.get('changeDate', 0), reverse=True)
+                        latest_track = track_info_list[0]
+                        change_date = latest_track.get('changeDate')
+                        if change_date:
+                            from datetime import timezone
+                            # 添加UTC时区信息，使其成为aware datetime
+                            headhaul_time = datetime.fromtimestamp(change_date / 1000.0, tz=timezone.utc)
+            except:
+                pass
+        
+        # 尾程时间和状态码
+        lastmile_time = None
+        lastmile_status_code = ""
+        if row.lastmile_tracking_response:
+            try:
+                lastmile_data = json.loads(row.lastmile_tracking_response)
+                if isinstance(lastmile_data, dict) and lastmile_data.get("code") == 0:
+                    data_content = lastmile_data.get("data", {})
+                    if isinstance(data_content, dict):
+                        accepted = data_content.get("accepted", [])
+                        if accepted and len(accepted) > 0:
+                            track_info = accepted[0].get("track_info", {})
+                            latest_event = track_info.get("latest_event", {})
+                            if latest_event:
+                                time_iso = latest_event.get("time_iso", "")
+                                sub_status = latest_event.get("sub_status", "")
+                                description = latest_event.get("description", "")
+                                
+                                # 解析时间
+                                if time_iso:
+                                    try:
+                                        lastmile_time = datetime.fromisoformat(time_iso.replace('Z', '+00:00'))
+                                    except:
+                                        pass
+                                
+                                # 匹配尾程状态码
+                                if sub_status:
+                                    mapping = None
+                                    if description:
+                                        mapping = LastmileStatusMapping.query.filter_by(
+                                            description=description,
+                                            sub_status=sub_status
+                                        ).first()
+                                    if not mapping:
+                                        mapping = LastmileStatusMapping.query.filter(
+                                            LastmileStatusMapping.sub_status == sub_status,
+                                            db.or_(
+                                                LastmileStatusMapping.description == '',
+                                                LastmileStatusMapping.description.is_(None)
+                                            )
+                                        ).first()
+                                    if mapping:
+                                        lastmile_status_code = mapping.system_status_code
+            except:
+                pass
+        
+        # 比较时间，取最新的状态码
+        if headhaul_time and lastmile_time:
+            if lastmile_time > headhaul_time:
+                final_status_code = lastmile_status_code
+                final_tracking_time = lastmile_time
+            else:
+                final_status_code = headhaul_status_code
+                final_tracking_time = headhaul_time
+        elif headhaul_time:
+            final_status_code = headhaul_status_code
+            final_tracking_time = headhaul_time
+        elif lastmile_time:
+            final_status_code = lastmile_status_code
+            final_tracking_time = lastmile_time
+        else:
+            final_status_code = headhaul_status_code  # 都没有时间，使用头程
+        
+        # 根据最终状态码获取描述
+        if final_status_code:
+            node = TrackingNode.query.filter_by(status_code=final_status_code).first()
+            if node:
+                status_description = node.status_description
+            else:
+                status_description = final_status_code
+        
+        tracking_data.append({
+            "waybill_id": row.id,
+            "order_no": row.order_no,
+            "transfer_no": row.transfer_no or "",
+            "last_mile_no": last_mile_no,
+            "order_time": row.order_time.isoformat() if row.order_time else None,
+            "status_code": final_status_code or "",
+            "status_description": status_description,
+            "last_fetch_time": row.last_fetch_time.isoformat() if row.last_fetch_time else None,
+            "last_push_time": row.last_push_time.isoformat() if row.last_push_time else None,
+            "stop_tracking": row.stop_tracking or False,
+            "tracking_id": row.tracking_id,
+            "interface_name": row.interface_name or "",
+            "has_raw_response": has_raw_response,
+            "has_lastmile_response": has_lastmile_response,
+            "has_push_events": bool(row.push_events),
+            "has_szpost_response": bool(row.szpost_response)
+        })
+
+    return jsonify({
+        "success": True,
+        "tracking_data": tracking_data,
+        "pagination": {
+            "total": pagination.total,
+            "pages": pagination.pages,
+            "current_page": pagination.page,
+            "per_page": pagination.per_page
+        }
+    })
+
+
+@app.get("/api/tracking-data/<int:tracking_id>/details")
+def api_get_tracking_details(tracking_id):
+    """获取轨迹详情"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    tracking = TrackingInfo.query.get(tracking_id)
+    if not tracking:
+        return jsonify({"success": False, "message": "轨迹信息不存在"}), 404
+
+    return jsonify({
+        "success": True,
+        "tracking": {
+            "id": tracking.id,
+            "order_no": tracking.order_no,
+            "transfer_no": tracking.transfer_no or "",
+            "tracking_description": tracking.tracking_description or "",
+            "status_code": tracking.status_code or "",
+            "tracking_time": tracking.tracking_time.isoformat() if tracking.tracking_time else None,
+            "last_fetch_time": tracking.last_fetch_time.isoformat() if tracking.last_fetch_time else None,
+            "last_push_time": tracking.last_push_time.isoformat() if tracking.last_push_time else None,
+            "raw_response": tracking.raw_response or "",
+            "lastmile_register_response": tracking.lastmile_register_response or "",
+            "lastmile_tracking_response": tracking.lastmile_tracking_response or ""
+        }
+    })
+
+
+@app.post("/api/tracking-data/push")
+def api_push_tracking_data():
+    """手动推送轨迹数据到深邮接口"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限推送轨迹"}), 403
+
+    data = request.get_json() or {}
+    tracking_ids = data.get("tracking_ids") or []
+
+    if not tracking_ids:
+        return jsonify({"success": False, "message": "请选择要推送的轨迹"}), 400
+
+    try:
+        from tracking_handler.push_szpost_handler import push_tracking_to_szpost
+        import json
+        from datetime import datetime
+        
+        # 查询轨迹信息和推送报文
+        trackings = TrackingInfo.query.filter(TrackingInfo.id.in_(tracking_ids)).all()
+        
+        if not trackings:
+            return jsonify({"success": False, "message": "未找到轨迹信息"}), 404
+        
+        # 获取所有轨迹节点映射
+        all_status_codes = set()
+        for tracking in trackings:
+            if tracking.push_events:
+                events = json.loads(tracking.push_events)
+                for event in events:
+                    status_code = event.get('status_code')
+                    if status_code:
+                        all_status_codes.add(status_code)
+        
+        # 查询轨迹节点信息
+        tracking_nodes = TrackingNode.query.filter(TrackingNode.status_code.in_(all_status_codes)).all()
+        tracking_nodes_map = {node.status_code: node for node in tracking_nodes}
+        
+        # 合并所有推送事件
+        all_push_events = []
+        for tracking in trackings:
+            if tracking.push_events:
+                events = json.loads(tracking.push_events)
+                all_push_events.extend(events)
+        
+        if not all_push_events:
+            return jsonify({"success": False, "message": "没有可推送的轨迹数据"}), 400
+        
+        # 推送到深邮接口
+        result = push_tracking_to_szpost(all_push_events, tracking_nodes_map)
+        
+        # 保存响应报文
+        now = datetime.utcnow()
+        response_json = json.dumps(result, ensure_ascii=False)
+        
+        for tracking in trackings:
+            tracking.szpost_response = response_json
+            tracking.last_push_time = now
+        
+        db.session.commit()
+        
+        if result.get('success'):
+            return jsonify({
+                "success": True,
+                "message": f"成功推送 {len(tracking_ids)} 条轨迹数据"
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": f"推送失败: {result.get('message')}"
+            }), 500
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "message": f"推送异常: {str(e)}"
+        }), 500
+
+
+@app.post("/api/tracking-data/fetch")
+def api_fetch_tracking_data():
+    """手动获取轨迹数据（异步）"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限获取轨迹"}), 403
+
+    data = request.get_json() or {}
+    waybill_ids = data.get("waybill_ids") or []
+
+    if not waybill_ids:
+        return jsonify({"success": False, "message": "请选择要获取轨迹的运单"}), 400
+    
+    try:
+        # 提交异步任务
+        task = async_fetch_tracking_task.delay(waybill_ids)
+        
+        # 记录任务
+        new_task = TaskRecord(
+            task_id=task.id,
+            task_name=f"获取头程轨迹({len(waybill_ids)}单)",
+            status="PENDING"
+        )
+        db.session.add(new_task)
+        db.session.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": f"已提交异步任务，共{len(waybill_ids)}单，请稍后查看结果",
+            "task_id": task.id
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"提交任务失败：{str(e)}"
+        }), 500
+
+    # 查询运单信息和关联的接口配置
+    waybills_query = db.session.query(
+        Waybill.id,
+        Waybill.order_no,
+        Waybill.transfer_no,
+        Waybill.product_id,
+        Product.tracking_interface_id,
+        TrackingInterface.id.label('interface_id'),
+        TrackingInterface.interface_name,
+        TrackingInterface.request_url,
+        TrackingInterface.auth_params,
+        TrackingInterface.status_mapping,
+        TrackingInterface.response_key_params
+    ).join(
+        Product, Waybill.product_id == Product.id
+    ).outerjoin(
+        TrackingInterface, Product.tracking_interface_id == TrackingInterface.id
+    ).filter(
+        Waybill.id.in_(waybill_ids)
+    ).all()
+
+    if not waybills_query:
+        return jsonify({"success": False, "message": "未找到运单信息"}), 404
+
+    # 按接口分组
+    from tracking_handler.tracking_handler_manager import batch_fetch_tracking_by_interface
+    import json
+    from datetime import datetime
+
+    interface_groups = {}
+    for row in waybills_query:
+        if not row.interface_id:
+            continue
+        
+        interface_id = row.interface_id
+        if interface_id not in interface_groups:
+            interface_groups[interface_id] = {
+                'config': {
+                    'interface_name': row.interface_name,
+                    'request_url': row.request_url,
+                    'auth_params': row.auth_params
+                },
+                'status_mapping': json.loads(row.status_mapping) if row.status_mapping else [],
+                'response_key_params': json.loads(row.response_key_params) if row.response_key_params else None,
+                'waybills': []
+            }
+        
+        interface_groups[interface_id]['waybills'].append({
+            'waybill_id': row.id,
+            'order_no': row.order_no,
+            'transfer_no': row.transfer_no
+        })
+
+    # 批量获取轨迹
+    success_count = 0
+    fail_count = 0
+    error_details = []  # 记录失败详情
+    
+    for interface_id, group_data in interface_groups.items():
+        results = batch_fetch_tracking_by_interface(
+            group_data['waybills'],
+            group_data['config'],
+            group_data['status_mapping'],
+            group_data.get('response_key_params')
+        )
+        
+        # 保存结果到数据库
+        for result in results:
+            if not result.get('success'):
+                fail_count += 1
+                # 记录失败原因
+                error_details.append({
+                    'order_no': result.get('order_no', 'Unknown'),
+                    'transfer_no': result.get('transfer_no', 'Unknown'),
+                    'error': result.get('message', '未知错误')
+                })
+                continue
+            
+            waybill_id = result['waybill_id']
+            order_no = result['order_no']
+            transfer_no = result['transfer_no']
+            
+            # 查询运单信息，用于检查停止条件
+            waybill = Waybill.query.get(waybill_id)
+            if not waybill:
+                fail_count += 1
+                error_details.append({
+                    'order_no': order_no,
+                    'transfer_no': transfer_no,
+                    'error': '运单不存在'
+                })
+                continue
+            
+            # 查找或创建轨迹记录
+            tracking = TrackingInfo.query.filter_by(
+                waybill_id=waybill_id
+            ).first()
+            
+            now = datetime.utcnow()
+            
+            if tracking:
+                # 更新现有记录
+                tracking.tracking_description = result.get('tracking_description', '')
+                tracking.status_code = result.get('status_code', '')
+                tracking.tracking_time = result.get('tracking_time')
+                tracking.raw_response = result.get('raw_response', '')
+                tracking.last_fetch_time = now
+                
+                # 从json中提取尾程单号并保存
+                try:
+                    raw_data = json.loads(result.get('raw_response', '{}'))
+                    if "tracks" in raw_data and raw_data["tracks"]:
+                        lastmile_no = raw_data["tracks"][0].get("transferNo", "")
+                        if lastmile_no:
+                            tracking.lastmile_no = lastmile_no
+                except:
+                    pass
+            else:
+                # 创建新记录
+                # 先提取尾程单号
+                lastmile_no = ""
+                try:
+                    raw_data = json.loads(result.get('raw_response', '{}'))
+                    if "tracks" in raw_data and raw_data["tracks"]:
+                        lastmile_no = raw_data["tracks"][0].get("transferNo", "")
+                except:
+                    pass
+                
+                tracking = TrackingInfo(
+                    waybill_id=waybill_id,
+                    order_no=order_no,
+                    transfer_no=transfer_no,
+                    tracking_interface_id=interface_id,
+                    tracking_description=result.get('tracking_description', ''),
+                    status_code=result.get('status_code', ''),
+                    tracking_time=result.get('tracking_time'),
+                    raw_response=result.get('raw_response', ''),
+                    lastmile_no=lastmile_no if lastmile_no else None,
+                    last_fetch_time=now
+                )
+                db.session.add(tracking)
+            
+            # 刷新tracking对象，确保status_code已更新
+            db.session.flush()
+            db.session.refresh(tracking)
+            
+            # 检查是否应该停止跟踪（在status_code更新后检查）
+            should_stop, reason = should_stop_tracking(waybill, tracking)
+            if should_stop:
+                tracking.stop_tracking = True
+                tracking.stop_tracking_reason = reason
+                tracking.stop_tracking_time = now
+            
+            success_count += 1
+    
+    try:
+        db.session.commit()
+        message = f"成功获取 {success_count} 条运单轨迹数据"
+        if fail_count > 0:
+            message += f"，{fail_count} 条失败"
+            # 添加错误详情
+            if error_details:
+                error_summary = "; ".join([f"{e['transfer_no']}: {e['error']}" for e in error_details[:3]])
+                message += f" ({error_summary})"
+        
+        return jsonify({
+            "success": True,
+            "message": message,
+            "error_details": error_details  # 返回详细错误信息
+        })
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"success": False, "message": f"保存失败: {str(e)}"}), 500
+
+
+@app.post("/api/tracking-data/batch-check-stop")
+def api_batch_check_stop_tracking():
+    """批量检查运单，标记满足停止条件的运单"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+
+@app.get("/api/tracking-data/<int:tracking_id>/push-events")
+def api_get_push_events(tracking_id):
+    """获取推送报文"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+    
+    tracking = TrackingInfo.query.get(tracking_id)
+    if not tracking:
+        return jsonify({"success": False, "message": "轨迹信息不存在"}), 404
+    
+    import json
+    push_events = json.loads(tracking.push_events) if tracking.push_events else []
+    
+    return jsonify({
+        "success": True,
+        "push_events": push_events,
+        "order_no": tracking.order_no
+    })
+
+
+@app.put("/api/tracking-data/<int:tracking_id>/push-events")
+def api_update_push_events(tracking_id):
+    """更新推送报文（删除某个事件）"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+    
+    tracking = TrackingInfo.query.get(tracking_id)
+    if not tracking:
+        return jsonify({"success": False, "message": "轨迹信息不存在"}), 404
+    
+    import json
+    data = request.get_json() or {}
+    push_events = data.get("push_events", [])
+    
+    # 更新推送报文
+    tracking.push_events = json.dumps(push_events, ensure_ascii=False)
+    db.session.commit()
+    
+    return jsonify({
+        "success": True,
+        "message": "更新成功"
+    })
+
+
+@app.get("/api/tracking-data/<int:tracking_id>/szpost-response")
+def api_get_szpost_response(tracking_id):
+    """获取深邮响应报文"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+    
+    tracking = TrackingInfo.query.get(tracking_id)
+    if not tracking:
+        return jsonify({"success": False, "message": "轨迹信息不存在"}), 404
+    
+    return jsonify({
+        "success": True,
+        "szpost_response": tracking.szpost_response or '',
+        "order_no": tracking.order_no
+    })
+
+
+@app.post("/api/tracking-data/batch-check-stop")
+def api_batch_check_stop_tracking_old():
+    """批量检查运单，标记满足停止条件的运单"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限执行此操作"}), 403
+
+    try:
+        result = batch_check_stop_tracking()
+        if result.get('success'):
+            return jsonify(result)
+        else:
+            return jsonify(result), 500
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"执行失败: {str(e)}"
+        }), 500
+
+
+@app.post("/api/tracking-data/fetch-lastmile")
+def api_fetch_lastmile_tracking():
+    """获取尾程轨迹数据（异步）"""
+    try:
+        print(f"[尾程轨迹] 收到请求，方法: {request.method}")
+        
+        current_user = session.get("user")
+        if not current_user:
+            print("[尾程轨迹] 错误：未登录")
+            return jsonify({"success": False, "message": "未登录"}), 401
+
+        if current_user.get("role") != "系统管理员":
+            print(f"[尾程轨迹] 错误：权限不足，用户角色: {current_user.get('role')}")
+            return jsonify({"success": False, "message": "无权限获取尾程轨迹"}), 403
+
+        data = request.get_json() or {}
+        waybill_ids = data.get("waybill_ids") or []
+        print(f"[尾程轨迹] 运单ID列表: {waybill_ids}")
+        
+        if not waybill_ids:
+            print("[尾程轨迹] 错误：未选择运单")
+            return jsonify({"success": False, "message": "请选择要获取尾程轨迹的运单"}), 400
+        
+        # 提交异步任务
+        task = async_fetch_lastmile_tracking_task.delay(waybill_ids)
+        print(f"[尾程轨迹] 任务已提交，Task ID: {task.id}")
+        
+        # 记录任务
+        new_task = TaskRecord(
+            task_id=task.id,
+            task_name=f"获取尾程轨迹({len(waybill_ids)}单)",
+            status="PENDING"
+        )
+        db.session.add(new_task)
+        db.session.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": f"已提交异步任务，共{len(waybill_ids)}单，请稍后查看结果",
+            "task_id": task.id
+        })
+    
+    except Exception as e:
+        error_msg = f"提交任务失败: {str(e)}"
+        print(f"[尾程轨迹] 异常: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "message": error_msg
+        }), 500
+
+
+
+
+@app.post("/api/tracking-data/import-lastmile")
+def api_import_lastmile_numbers():
+    """导入尾程单号"""
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"success": False, "message": "未登录"}), 401
+
+    if current_user.get("role") != "系统管理员":
+        return jsonify({"success": False, "message": "无权限导入"}), 403
+
+    if 'file' not in request.files:
+        return jsonify({"success": False, "message": "没有上传文件"}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"success": False, "message": "文件名为空"}), 400
+
+    if not file.filename.endswith(('.xlsx', '.xls')):
+        return jsonify({"success": False, "message": "请上传Excel文件"}), 400
+
+    try:
+        import pandas as pd
+        from datetime import datetime
+        
+        # 读取Excel
+        df = pd.read_excel(file, dtype=str)
+        
+        # 验证表头
+        if '订单号' not in df.columns or '尾程单号' not in df.columns:
+            return jsonify({"success": False, "message": "Excel表头必须包含：订单号、尾程单号"}), 400
+        
+        # 验证每一行
+        errors = []
+        to_update = []
+        
+        for idx, row in df.iterrows():
+            order_no = str(row['订单号']).strip() if pd.notna(row['订单号']) else ""
+            lastmile_no = str(row['尾程单号']).strip() if pd.notna(row['尾程单号']) else ""
+            
+            if not order_no:
+                errors.append(f"第{idx+2}行：订单号为空")
+                break
+            
+            if not lastmile_no:
+                errors.append(f"第{idx+2}行：尾程单号为空")
+                break
+            
+            # 检查订单号是否存在
+            waybill = Waybill.query.filter_by(order_no=order_no).first()
+            if not waybill:
+                errors.append(f"第{idx+2}行：订单号'{order_no}'不存在")
+                break
+            
+            # 查找或创建轨迹记录（UPSERT逻辑）
+            tracking = TrackingInfo.query.filter_by(waybill_id=waybill.id).first()
+            if not tracking:
+                # 如果没有轨迹记录（例如删除后重新导入），创建一条新记录
+                product = Product.query.get(waybill.product_id)
+                tracking_interface_id = product.tracking_interface_id if product else None
+                
+                tracking = TrackingInfo(
+                    waybill_id=waybill.id,
+                    order_no=waybill.order_no,
+                    transfer_no=waybill.transfer_no,
+                    tracking_interface_id=tracking_interface_id,
+                    lastmile_no=lastmile_no
+                )
+                db.session.add(tracking)
+                # 立即flush以获取ID，避免后续操作冲突
+                db.session.flush()
+            
+            to_update.append({
+                'tracking': tracking,
+                'lastmile_no': lastmile_no,
+                'waybill_id': waybill.id
+            })
+        
+        # 如果有错误，返回错误
+        if errors:
+            return jsonify({"success": False, "message": errors[0]}), 400
+        
+        # 先保存尾程单号到数据库，立即返回
+        now = datetime.utcnow()
+        for item in to_update:
+            item['tracking'].lastmile_no = item['lastmile_no']
+        
+        db.session.commit()
+        
+        # 返回成功，先不触发获取（用户可以手动点击“获取尾程单轨迹”按钮）
+        return jsonify({
+            "success": True,
+            "message": f"成功导入{len(to_update)}条尾程单号，请勾选运单后点击“获取尾程单轨迹”按钮获取轨迹信息"
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"success": False, "message": f"导入失败：{str(e)}"}), 500
+
+
+@app.get("/api/tracking-data/lastmile-template")
+def api_download_lastmile_template():
+    """下载尾程单号导入模板"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    import io
+    
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "尾程单号导入"
+    
+    # 设置表头
+    headers = ['订单号', '尾程单号']
+    ws.append(headers)
+    
+    # 设置表头样式
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid')
+    
+    # 添加示例数据
+    ws.append(['ZC12345678', 'GFUS01028251402241'])
+    
+    # 保存到内存
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    return send_file(
+        output,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name='尾程单号导入模板.xlsx'
+    )
+
+
+# ==================== 客户管理 API ====================
 @app.get("/api/customers")
 def api_get_customers():
     """获取客户列表"""
@@ -1403,9 +3859,14 @@ def api_create_customer():
     # 验证邮箱格式（如果填写了）
     if email:
         import re
+        # 支持多个邮箱，用中英文分号分隔
         email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, email):
-            return jsonify({"success": False, "message": "邮箱格式不正确", "field": "email"}), 400
+        # 分隔邮箱（支持; 和 ；）
+        emails = re.split(r'[;；]', email)
+        for e in emails:
+            e = e.strip()
+            if e and not re.match(email_pattern, e):
+                return jsonify({"success": False, "message": f"邮箱格式不正确：{e}", "field": "email"}), 400
 
     # 将数组转为逗号分隔的字符串
     customer_types_str = ",".join(customer_types)
@@ -1459,9 +3920,14 @@ def api_update_customer(customer_id):
     # 验证邮箱格式
     if email:
         import re
+        # 支持多个邮箱，用中英文分号分隔
         email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, email):
-            return jsonify({"success": False, "message": "邮箱格式不正确", "field": "email"}), 400
+        # 分隔邮箱（支持; 和 ；）
+        emails = re.split(r'[;；]', email)
+        for e in emails:
+            e = e.strip()
+            if e and not re.match(email_pattern, e):
+                return jsonify({"success": False, "message": f"邮箱格式不正确：{e}", "field": "email"}), 400
 
     customer.full_name = full_name
     customer.short_name = short_name
@@ -1879,6 +4345,13 @@ def api_create_customer_quote():
                         "success": False, 
                         "message": f"该客户在此时期内已有包含产品({', '.join(conflicting_product_names)})的{quote_type}"
                     }), 400
+    else:
+        # 对于单号报价，直接检查时间冲突
+        if conflict_query.first():
+            return jsonify({
+                "success": False,
+                "message": f"该客户在此时期内已有{quote_type}"
+            }), 400
     
     # 获取报价明细
     quote = CustomerQuote(
@@ -2048,6 +4521,13 @@ def api_update_customer_quote(quote_id):
                         "success": False, 
                         "message": f"该客户在此时期内已有包含产品({', '.join(conflicting_product_names)})的{quote_type}"
                     }), 400
+    else:
+        # 对于单号报价，直接检查时间冲突
+        if conflict_query.first():
+            return jsonify({
+                "success": False,
+                "message": f"该客户在此时期内已有{quote_type}"
+            }), 400
 
     # 更新基本信息
     quote.quote_name = quote_name
@@ -2525,12 +5005,10 @@ def api_get_waybills():
         total = query.count()
         query = query.order_by(Waybill.order_time.desc())
 
-    # 分页执行 (如果上面已经 limit(50000)，这里的分页会在那5万条内进行)
-    # 注意：SQLAlchemy 的 limit().limit() 会覆盖，所以我们需要 subquery
+    # 分页执行
     if not has_filter and full_count > 50000:
-        subq = query.subquery()
-        # 从子查询中进行分页
-        waybills = db.session.query(Waybill).select_entity_from(subq).limit(page_size).offset((page - 1) * page_size).all()
+        # 对于超过50000条且无过滤条件的情况，直接使用limit和offset
+        waybills = query.limit(page_size).offset((page - 1) * page_size).all()
     else:
         waybills = query.limit(page_size).offset((page - 1) * page_size).all()
     
@@ -2745,7 +5223,7 @@ def api_download_waybill_template():
     
     # 设置表头
     headers = ["订单号", "转单号", "重量(kg)", "下单时间", "产品", 
-                "单号客户", "头程客户", "尾程客户", "差价客户", "供应商"]
+                "单号客户", "头程客户", "尾程客户", "差价客户"]
     ws.append(headers)
     
     # 设置表头样式
@@ -2768,7 +5246,6 @@ def api_download_waybill_template():
     ws.column_dimensions['G'].width = 15  # 头程客户
     ws.column_dimensions['H'].width = 15  # 尾程客户
     ws.column_dimensions['I'].width = 15  # 差价客户
-    ws.column_dimensions['J'].width = 15  # 供应商
     
     # 添加示例数据（第2行）
     example_data = [
@@ -2780,8 +5257,7 @@ def api_download_waybill_template():
         "客户A简称",  # 单号客户
         "客户B简称",  # 头程客户
         "客户C简称",  # 尾程客户
-        "",  # 差价客户
-        "供应商简称"  # 供应商
+        ""  # 差价客户
     ]
     ws.append(example_data)
     
@@ -2835,7 +5311,8 @@ def api_import_waybills():
             'Customer': Customer,
             'Supplier': Supplier,
             'CustomerQuote': CustomerQuote,
-            'SupplierQuote': SupplierQuote
+            'SupplierQuote': SupplierQuote,
+            'TrackingInfo': TrackingInfo  # 添加TrackingInfo模型
         }
         
         # 处理导入
@@ -3139,17 +5616,24 @@ def api_generate_invoices():
     data = request.get_json() or {}
     year = data.get("year")
     month = data.get("month")
+    customer_id = data.get("customer_id")  # 新增客户ID参数
 
     if not year or not month:
         return jsonify({"success": False, "message": "请选择年份和月份"}), 400
 
-    # 提交异步任务
-    task = async_generate_customer_invoices.delay(year, month)
+    # 提交异步任务，传递customer_id参数
+    task = async_generate_customer_invoices.delay(year, month, customer_id)
     
     # 记录任务
+    task_name = f"生成应收账单({year}-{month})"
+    if customer_id:
+        customer = Customer.query.get(customer_id)
+        if customer:
+            task_name = f"生成应收账单({year}-{month})-{customer.short_name}"
+    
     new_task = TaskRecord(
         task_id=task.id,
-        task_name=f"生成应收账单({year}-{month})",
+        task_name=task_name,
         status="PENDING"
     )
     db.session.add(new_task)

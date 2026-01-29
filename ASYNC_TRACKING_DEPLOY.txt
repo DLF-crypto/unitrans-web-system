@@ -1,0 +1,99 @@
+=============================================================================
+异步轨迹获取系统 - 部署指令
+=============================================================================
+
+## 一、本地测试
+
+1. 启动Redis
+   redis-server
+
+2. 启动Celery Worker（新终端）
+   cd c:\Users\41026\Desktop\Project\unitrans-web-system
+   .\myenv\Scripts\activate
+   celery -A celery_worker.celery worker --loglevel=info -P threads -Q tracking
+
+3. 启动Flask（新终端）
+   cd c:\Users\41026\Desktop\Project\unitrans-web-system
+   .\myenv\Scripts\activate
+   python app.py
+
+4. 测试
+   - 勾选运单，点击"获取轨迹"或"获取尾程轨迹"
+   - 应立即返回task_id
+   - 后台Celery日志显示处理进度
+   - 刷新页面查看结果
+
+## 二、服务器部署
+
+1. 上传代码到服务器
+   git add .
+   git commit -m "feat: 异步轨迹获取优化"
+   git push origin main
+
+2. 服务器更新代码
+   cd /var/www/unitrans-web-system
+   git pull origin main
+   source venv/bin/activate
+
+3. 启动/重启Celery Worker
+   sudo systemctl restart celery-worker
+
+4. 启动/重启Flask
+   sudo systemctl restart unitrans-web
+
+5. 查看日志
+   sudo journalctl -u celery-worker -f
+   sudo journalctl -u unitrans-web -f
+
+## 三、Systemd服务配置（如需新建）
+
+### 3.1 Celery Worker服务
+
+文件：/etc/systemd/system/celery-worker.service
+
+[Unit]
+Description=Celery Worker for Unitrans
+After=network.target redis.service
+
+[Service]
+Type=forking
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/unitrans-web-system
+Environment="PATH=/var/www/unitrans-web-system/venv/bin"
+ExecStart=/var/www/unitrans-web-system/venv/bin/celery -A celery_worker.celery worker --loglevel=info -P threads -Q tracking --detach --pidfile=/var/run/celery/worker.pid --logfile=/var/log/celery/worker.log
+ExecStop=/bin/kill -s TERM $MAINPID
+Restart=always
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
+
+### 3.2 启用服务
+
+sudo mkdir -p /var/run/celery /var/log/celery
+sudo chown www-data:www-data /var/run/celery /var/log/celery
+sudo systemctl daemon-reload
+sudo systemctl enable celery-worker
+sudo systemctl start celery-worker
+
+## 四、前端调整说明
+
+前端无需修改，已自动适配：
+- 点击按钮立即返回
+- 显示"已提交异步任务"
+- 提示用户刷新查看结果
+
+## 五、监控任务状态
+
+可通过以下API查询任务状态：
+GET /api/tasks/<task_id>
+
+返回格式：
+{
+  "task_id": "xxx",
+  "status": "PENDING/PROCESSING/SUCCESS/FAILURE",
+  "result_msg": "成功: 62单"
+}
+
+=============================================================================

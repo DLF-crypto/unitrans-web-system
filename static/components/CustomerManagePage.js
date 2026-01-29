@@ -145,13 +145,14 @@ const CustomerManagePage = {
                             </div>
 
                             <div class="form-field">
-                                <label>邮箱</label>
-                                <input
-                                    type="email"
+                                <label>邮箱 <span style="color: #6b8a80; font-size: 12px;">（多个邮箱用；分隔）</span></label>
+                                <textarea
                                     class="form-input"
                                     v-model.trim="form.email"
-                                    placeholder="请输入邮箱"
-                                />
+                                    placeholder="请输入邮箱，多个邮箱用；分隔"
+                                    rows="2"
+                                    style="resize: vertical;"
+                                ></textarea>
                                 <div v-if="errors.email" class="error-text">{{ errors.email }}</div>
                             </div>
                         </div>
@@ -323,10 +324,15 @@ const CustomerManagePage = {
 
             // 验证邮箱格式（如果填写了）
             if (this.form.email) {
+                // 支持多个邮箱，用；或;分隔（支持中英文分号）
+                const emails = this.form.email.split(/[;；]/).map(e => e.trim()).filter(e => e);
                 const emailPattern = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-                if (!emailPattern.test(this.form.email)) {
-                    this.errors.email = "邮箱格式不正确";
-                    valid = false;
+                for (let email of emails) {
+                    if (!emailPattern.test(email)) {
+                        this.errors.email = `邮箱格式不正确：${email}`;
+                        valid = false;
+                        break;
+                    }
                 }
             }
 

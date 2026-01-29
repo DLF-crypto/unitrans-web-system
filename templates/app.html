@@ -184,7 +184,16 @@
 <script src="/static/components/ReceivableInvoicePage.js"></script>
 <script src="/static/components/PayableInvoicePage.js"></script>
 <script src="/static/components/PaymentManagePage.js"></script>
+<script src="/static/components/TrackingNodeManagePage.js"></script>
+<script src="/static/components/TrackingInterfaceManagePage.js"></script>
+<script src="/static/components/LastmileStatusMappingPage.js"></script>
+<script src="/static/components/TrackingDataManagePage.js"></script>
 <script>
+    // 验证组件是否加载
+    console.log('=== app.html 版本: 2026-01-25-11:30 ===');
+    console.log('LastmileStatusMappingPage 组件:', typeof LastmileStatusMappingPage);
+    console.log('TrackingInterfaceManagePage 组件:', typeof TrackingInterfaceManagePage);
+    
     const initialUser = JSON.parse(document.getElementById('initial-data').textContent);
     const { createApp } = Vue;
     const { createRouter, createWebHashHistory } = VueRouter;
@@ -205,6 +214,10 @@
         { path: "/finance/payment", component: PaymentManagePage, meta: { title: "收付款管理" } },
         { path: "/finance/customer-quote", component: CustomerQuoteManagePage, meta: { title: "客户报价管理" } },
         { path: "/finance/supplier-quote", component: SupplierQuoteManagePage, meta: { title: "供应商报价管理" } },
+        { path: "/basic/tracking-node", component: TrackingNodeManagePage, meta: { title: "轨迹节点状态管理" } },
+        { path: "/basic/tracking-interface", component: TrackingInterfaceManagePage, meta: { title: "轨迹接口管理" } },
+        { path: "/basic/lastmile-mapping", component: LastmileStatusMappingPage, meta: { title: "尾程轨迹状态映射表" } },
+        { path: "/tracking/data", component: TrackingDataManagePage, meta: { title: "轨迹数据管理" } },
     ];
 
     const router = createRouter({
@@ -225,9 +238,13 @@
                 { id: "product", title: "产品管理", path: "/basic/product" },
                 { id: "customer", title: "客户管理", path: "/basic/customer" },
                 { id: "supplier", title: "供应商管理", path: "/basic/supplier" },
+                { id: "tracking-node", title: "轨迹节点状态管理", path: "/basic/tracking-node" },
+                { id: "tracking-interface", title: "轨迹接口管理", path: "/basic/tracking-interface" },
+                { id: "lastmile-mapping", title: "尾程轨迹状态映射表", path: "/basic/lastmile-mapping" },
             ],
         },
         { id: "waybill", title: "运单数据管理", path: "/waybill", children: [] },
+        { id: "tracking", title: "轨迹数据管理", path: "/tracking/data", children: [] },
         {
             id: "finance",
             title: "财务管理",

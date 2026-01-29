@@ -122,7 +122,7 @@ def validate_and_process_waybill_import(file_path, db, models):
         
         # 验证表头
         required_columns = ["订单号", "转单号", "重量(kg)", "下单时间", "产品", 
-                           "单号客户", "头程客户", "尾程客户", "差价客户", "供应商"]
+                           "单号客户", "头程客户", "尾程客户", "差价客户"]
         
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
@@ -232,6 +232,10 @@ def validate_and_process_waybill_import(file_path, db, models):
                     row_errors.append("下单时间不能为空")
                 else:
                     try:
+                        # 移除秒后面的小数点部分（如 2026-01-02 20:47:10.0 -> 2026-01-02 20:47:10）
+                        if '.' in order_time_str:
+                            order_time_str = order_time_str.split('.')[0]
+                        
                         # 尝试多种时间格式
                         order_time = None
                         formats = [
@@ -283,11 +287,22 @@ def validate_and_process_waybill_import(file_path, db, models):
                 else:
                     product = products_dict[product_name]
                 
-                # 6-9. 验证四个客户字段
-                unit_customer_name = str(row["单号客户"]).strip() if pd.notna(row["单号客户"]) else ""
-                first_leg_customer_name = str(row["头程客户"]).strip() if pd.notna(row["头程客户"]) else ""
-                last_leg_customer_name = str(row["尾程客户"]).strip() if pd.notna(row["尾程客户"]) else ""
-                differential_customer_name = str(row["差价客户"]).strip() if pd.notna(row["差价客户"]) else ""
+                # 6-9. 验证四个客户字段（正确处理NaN值）
+                unit_customer_name = ""
+                if pd.notna(row.get("单号客户")):
+                    unit_customer_name = str(row["单号客户"]).strip()
+                
+                first_leg_customer_name = ""
+                if pd.notna(row.get("头程客户")):
+                    first_leg_customer_name = str(row["头程客户"]).strip()
+                
+                last_leg_customer_name = ""
+                if pd.notna(row.get("尾程客户")):
+                    last_leg_customer_name = str(row["尾程客户"]).strip()
+                
+                differential_customer_name = ""
+                if pd.notna(row.get("差价客户")):
+                    differential_customer_name = str(row["差价客户"]).strip()
                 
                 unit_customer = None
                 first_leg_customer = None
@@ -357,21 +372,15 @@ def validate_and_process_waybill_import(file_path, db, models):
                         if differential_customer_name:
                             row_errors.append(f"产品'{product.name}'不包含差价收费，不应填写差价客户")
                 
-                # 10. 验证供应商
-                supplier_name = str(row["供应商"]).strip() if pd.notna(row["供应商"]) else ""
+                # 10. 从产品绑定的供应商自动获取
                 supplier = None
                 
                 if product and "差价收费" in product.fee_types.split(","):
-                    if not supplier_name:
-                        row_errors.append("产品包含差价收费，供应商必填")
-                    elif supplier_name not in suppliers_dict:
-                        row_errors.append(f"供应商'{supplier_name}'不存在")
-                    else:
-                        supplier = suppliers_dict[supplier_name]
-                else:
-                    # 产品不包含差价收费，但填写了供应商
-                    if supplier_name:
-                        row_errors.append(f"产品'{product.name}'不包含差价收费，不应填写供应商")
+                    # 产品包含差价收费，使用产品绑定的供应商
+                    if product.supplier_id:
+                        supplier = suppliers_dict.get(models['Supplier'].query.get(product.supplier_id).short_name)
+                    if not supplier:
+                        row_errors.append(f"产品'{product.name}'包含差价收费但未绑定供应商")
                 
                 # 如果有错误，记录并继续下一行
                 if row_errors:
@@ -459,9 +468,44 @@ def validate_and_process_waybill_import(file_path, db, models):
             if waybills_to_insert:
                 # 使用 bulk_insert_mappings 替代循环 add，大幅提升20万条数据的插入速度
                 db.session.bulk_insert_mappings(models['Waybill'], waybills_to_insert)
+                db.session.flush()  # 刷新以获取插入的ID
+                
+                # 为绑定了轨迹接口的运单创建轨迹记录
+                tracking_records_to_insert = []
+                
+                # 获取刚插入的运单（通过order_no查询）
+                order_nos = [w['order_no'] for w in waybills_to_insert]
+                inserted_waybills = models['Waybill'].query.filter(
+                    models['Waybill'].order_no.in_(order_nos)
+                ).all()
+                
+                for waybill in inserted_waybills:
+                    # 检查产品是否绑定了轨迹接口
+                    if waybill.product and waybill.product.tracking_interface_id:
+                        now = datetime.utcnow()
+                        tracking_records_to_insert.append({
+                            'waybill_id': waybill.id,
+                            'order_no': waybill.order_no,
+                            'transfer_no': waybill.transfer_no,
+                            'tracking_interface_id': waybill.product.tracking_interface_id,
+                            'last_fetch_time': None,  # 初始化为None，首次获取时会更新
+                            'stop_tracking': False,
+                            'created_at': now,  # 显式设置创建时间
+                            'updated_at': now   # 显式设置更新时间
+                        })
+                
+                # 批量插入轨迹记录
+                if tracking_records_to_insert:
+                    db.session.bulk_insert_mappings(models['TrackingInfo'], tracking_records_to_insert)
             
             db.session.commit()
-            return True, f"成功导入{len(waybills_to_insert)}条运单数据", None
+            
+            # 返回成功信息，包含轨迹初始化数量
+            tracking_count = len(tracking_records_to_insert) if waybills_to_insert else 0
+            message = f"成功导入{len(waybills_to_insert)}条运单数据"
+            if tracking_count > 0:
+                message += f"，初始化{tracking_count}条轨迹记录"
+            return True, message, None
             
         except Exception as e:
             db.session.rollback()

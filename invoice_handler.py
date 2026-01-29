@@ -172,9 +172,10 @@ def generate_supplier_invoices(year, month, db, models, invoice_folder):
     return count
 
 
-def generate_customer_invoices(year, month, db, models, invoice_folder):
+def generate_customer_invoices(year, month, db, models, invoice_folder, customer_id=None):
     """
     根据年份和月份生成客户账单。
+    customer_id: 可选，指定客户ID时只生成该客户的账单
     """
     Waybill = models['Waybill']
     Product = models['Product']
@@ -325,6 +326,10 @@ def generate_customer_invoices(year, month, db, models, invoice_folder):
 
         # 为每个客户生成一个新 Excel 账单 (不再套用模板)
         for cid, group_wbs in groups.items():
+            # 如果指定了customer_id，只处理该客户
+            if customer_id and cid != customer_id:
+                continue
+            
             customer = customers_dict.get(cid)
             if not customer:
                 continue

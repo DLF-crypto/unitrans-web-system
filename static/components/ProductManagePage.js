@@ -37,6 +37,9 @@ const ProductManagePage = {
                                       style="display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; background: #e5f4ef; color: #3a8c76; border-radius: 4px; font-size: 12px;">
                                     {{ type }}
                                 </span>
+                                <span v-if="product.supplier_name" style="display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; background: #fff3e0; color: #f57c00; border-radius: 4px; font-size: 12px;">
+                                    供应商：{{ product.supplier_name }}
+                                </span>
                             </td>
                             <td>
                                 <button class="btn-link" @click="openEditModal(product)">编辑</button>
@@ -125,6 +128,28 @@ const ProductManagePage = {
                             <div v-if="errors.fee_types" class="error-text" style="margin-top: 4px;">{{ errors.fee_types }}</div>
                         </div>
 
+                        <div v-if="hasDifferentialFee" class="form-field" style="margin-bottom: 20px;">
+                            <label>供应商 <span style="color: #e57373;">*</span></label>
+                            <select class="form-input" v-model="form.supplier_id">
+                                <option value="">请选择供应商</option>
+                                <option v-for="supplier in suppliers" :key="supplier.id" :value="supplier.id">
+                                    {{ supplier.short_name }}
+                                </option>
+                            </select>
+                            <div v-if="errors.supplier_id" class="error-text">{{ errors.supplier_id }}</div>
+                        </div>
+
+                        <div v-if="hasLastLegFee" class="form-field" style="margin-bottom: 20px;">
+                            <label>轨迹接口</label>
+                            <select class="form-input" v-model="form.tracking_interface_id">
+                                <option value="">请选择轨迹接口（非必选）</option>
+                                <option v-for="item in trackingInterfaces" :key="item.id" :value="item.id">
+                                    {{ item.interface_name }}
+                                </option>
+                            </select>
+                            <div v-if="errors.tracking_interface_id" class="error-text">{{ errors.tracking_interface_id }}</div>
+                        </div>
+
                         <div class="modal-footer">
                             <button type="button" class="btn btn-secondary" @click="closeModal">取消</button>
                             <button type="submit" class="btn btn-primary" :disabled="submitting">
@@ -140,6 +165,8 @@ const ProductManagePage = {
     data() {
         return {
             products: [],
+            suppliers: [],
+            trackingInterfaces: [],
             pagination: {
                 total: 0,
                 pages: 0,
@@ -152,19 +179,33 @@ const ProductManagePage = {
                 id: null,
                 name: "",
                 description: "",
-                fee_types: []
+                fee_types: [],
+                supplier_id: "",
+                tracking_interface_id: ""
             },
             errors: {
                 name: "",
                 description: "",
-                fee_types: ""
+                fee_types: "",
+                supplier_id: "",
+                tracking_interface_id: ""
             },
             submitting: false,
             feeTypeOptions: ["单号收费", "头程收费", "尾程收费", "差价收费"]
         };
     },
+    computed: {
+        hasDifferentialFee() {
+            return this.form.fee_types.includes('差价收费');
+        },
+        hasLastLegFee() {
+            return this.form.fee_types.includes('尾程收费');
+        }
+    },
     mounted() {
         this.loadProducts();
+        this.loadSuppliers();
+        this.loadTrackingInterfaces();
     },
     methods: {
         async loadProducts() {
@@ -184,10 +225,32 @@ const ProductManagePage = {
                 console.error("加载产品列表失败", e);
             }
         },
+        async loadSuppliers() {
+            try {
+                const res = await fetch('/api/suppliers');
+                const data = await res.json();
+                if (data.success) {
+                    this.suppliers = data.suppliers;
+                }
+            } catch (e) {
+                console.error("加载供应商列表失败", e);
+            }
+        },
+        async loadTrackingInterfaces() {
+            try {
+                const res = await fetch('/api/tracking-interfaces');
+                const data = await res.json();
+                if (data.success) {
+                    this.trackingInterfaces = data.interfaces;
+                }
+            } catch (e) {
+                console.error("加载轨迹接口列表失败", e);
+            }
+        },
         openCreateModal() {
             this.isEdit = false;
-            this.form = { id: null, name: "", description: "", fee_types: [] };
-            this.errors = { name: "", description: "", fee_types: "" };
+            this.form = { id: null, name: "", description: "", fee_types: [], supplier_id: "", tracking_interface_id: "" };
+            this.errors = { name: "", description: "", fee_types: "", supplier_id: "", tracking_interface_id: "" };
             this.showModal = true;
         },
         openEditModal(product) {
@@ -196,18 +259,20 @@ const ProductManagePage = {
                 id: product.id,
                 name: product.name,
                 description: product.description || "",
-                fee_types: [...product.fee_types]
+                fee_types: [...product.fee_types],
+                supplier_id: product.supplier_id || "",
+                tracking_interface_id: product.tracking_interface_id || ""
             };
-            this.errors = { name: "", description: "", fee_types: "" };
+            this.errors = { name: "", description: "", fee_types: "", supplier_id: "", tracking_interface_id: "" };
             this.showModal = true;
         },
         closeModal() {
             this.showModal = false;
-            this.form = { id: null, name: "", description: "", fee_types: [] };
-            this.errors = { name: "", description: "", fee_types: "" };
+            this.form = { id: null, name: "", description: "", fee_types: [], supplier_id: "", tracking_interface_id: "" };
+            this.errors = { name: "", description: "", fee_types: "", supplier_id: "", tracking_interface_id: "" };
         },
         validateForm() {
-            this.errors = { name: "", description: "", fee_types: "" };
+            this.errors = { name: "", description: "", fee_types: "", supplier_id: "", tracking_interface_id: "" };
             let valid = true;
 
             if (!this.form.name) {
@@ -222,6 +287,12 @@ const ProductManagePage = {
 
             if (!this.form.fee_types || this.form.fee_types.length === 0) {
                 this.errors.fee_types = "请至少选择一种收费类别";
+                valid = false;
+            }
+            
+            // 如果选择了差价收费，必须选择供应商
+            if (this.form.fee_types.includes('差价收费') && !this.form.supplier_id) {
+                this.errors.supplier_id = "包含差价收费时必须选择供应商";
                 valid = false;
             }
 
@@ -242,7 +313,9 @@ const ProductManagePage = {
                     body: JSON.stringify({
                         name: this.form.name,
                         description: this.form.description,
-                        fee_types: this.form.fee_types
+                        fee_types: this.form.fee_types,
+                        supplier_id: this.form.supplier_id || null,
+                        tracking_interface_id: this.form.tracking_interface_id || null
                     })
                 });
 
