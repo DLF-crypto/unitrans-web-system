@@ -27,12 +27,17 @@ jobs:
           sudo chown -R ubuntu:ubuntu .git
           git config --global --add safe.directory /var/www/unitrans-web-system
           
-          # 拉取最新代码
-          git pull origin main
+          # 增大git缓冲区并重试拉取
+          git config --global http.postBuffer 524288000
+          git config --global core.compression 0
+          git pull origin main --depth 1 || git fetch origin main && git reset --hard origin/main
           
           # 激活虚拟环境并安装依赖
           source venv/bin/activate
           pip install -r requirements.txt
+          
+          # 执行数据库迁移
+          mysql -u root -p'${{ secrets.DB_PASSWORD }}' unitransDB < migration_complete.sql || true
           
           # 重启服务
           sudo systemctl restart unitrans-web
