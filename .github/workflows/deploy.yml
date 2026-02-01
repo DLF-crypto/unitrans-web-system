@@ -24,6 +24,7 @@ jobs:
         script: |
           # 解决git所有权问题
           cd /var/www/unitrans-web-system
+          sudo chown -R ubuntu:ubuntu .git
           git config --global --add safe.directory /var/www/unitrans-web-system
           
           # 拉取最新代码
