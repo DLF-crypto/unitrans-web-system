@@ -21,15 +21,25 @@ from invoice_handler import generate_customer_invoices, generate_supplier_invoic
 app = Flask(__name__)
 app.secret_key = "dev-change-this-secret"  # 用于会话管理，后续可根据需要修改
 
-# Celery 配置
-app.config['broker_url'] = 'redis://127.0.0.1:6379/0'
-app.config['result_backend'] = 'redis://127.0.0.1:6379/0'
+# Celery 配置 - 从环境变量读取
+redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
+redis_port = os.getenv('REDIS_PORT', '6379')
+redis_password = os.getenv('REDIS_PASSWORD', '')
+
+# 构建 Redis URL
+if redis_password:
+    redis_url = f'redis://:{redis_password}@{redis_host}:{redis_port}/0'
+else:
+    redis_url = f'redis://{redis_host}:{redis_port}/0'
+
+app.config['broker_url'] = redis_url
+app.config['result_backend'] = redis_url
 
 def make_celery(app):
     celery = Celery(
         app.import_name,
-        backend=app.config.get('result_backend', 'redis://127.0.0.1:6379/0'),
-        broker=app.config.get('broker_url', 'redis://127.0.0.1:6379/0')
+        backend=app.config.get('result_backend'),
+        broker=app.config.get('broker_url')
     )
     celery.conf.update(app.config)
 

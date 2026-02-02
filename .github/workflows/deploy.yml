@@ -31,11 +31,16 @@ jobs:
           git config pull.rebase false
           git fetch origin main --depth 1
           git reset --hard origin/main
-          git clean -fd
+          git clean -fd -e venv -e uploads
           
           # 激活虚拟环境并安装依赖
           source venv/bin/activate
           pip install -r requirements.txt
+          
+          # 确保uploads目录权限正确
+          sudo mkdir -p uploads
+          sudo chown -R www-data:www-data uploads
+          sudo chmod -R 775 uploads
           
           # 执行数据库迁移
           mysql -u root -p'${{ secrets.DB_PASSWORD }}' unitransDB < migration_complete.sql || true
